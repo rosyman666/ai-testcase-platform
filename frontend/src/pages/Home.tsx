@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -11,26 +10,14 @@ import Typography from '@mui/material/Typography';
 import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import { fetchCurrentUser } from '@/api/auth';
+import { fetchHealth } from '@/api/system';
 import { useAuthStore } from '@/store/authStore';
-import type { ApiEnvelope } from '@/types/common';
-
-/** `GET /api/health` 的业务数据。 */
-interface HealthData {
-  status: string;
-  dbOk: boolean;
-  provider: string;
-  model: string;
-  time: string;
-}
-
-/** 后端地址（缺省走 dev proxy）。 */
-const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
 
 /**
  * 占位首页：T02 的"鉴权闭环 + 基础设施自检"页面，T12 会用真正的 AppShell + 概览页替换它。
  *
- * 保留它是为了把 T01 的自检能力（health、traceId）与 T02 的新能力（登录态、token、
- * Long→String）放在同一个可视面上，QA 一眼就能验完。
+ * 数据获取一律通过 `@/api/*`（见 §8.5），组件里不出现 axios、不拼 baseURL——
+ * 否则会绕过 `http.ts` 的 401 处理与 traceId 归一化。
  */
 export default function Home(): JSX.Element {
   const navigate = useNavigate();
@@ -46,13 +33,10 @@ export default function Home(): JSX.Element {
 
   const healthQuery = useQuery({
     queryKey: ['health'],
-    queryFn: async () => {
-      const response = await axios.get<ApiEnvelope<HealthData>>(`${API_BASE}/health`);
-      return response.data;
-    },
+    queryFn: fetchHealth,
   });
 
-  const health = healthQuery.data?.data;
+  const health = healthQuery.data;
   const me = meQuery.data;
 
   const handleLogout = (): void => {
@@ -134,14 +118,14 @@ export default function Home(): JSX.Element {
             ) : (
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                 <Chip
-                  label={healthQuery.data?.code === 0 ? 'code = 0' : 'code != 0'}
-                  color={healthQuery.data?.code === 0 ? 'success' : 'error'}
+                  label={health ? '连接正常' : '检测中…'}
+                  color={health ? 'success' : 'default'}
                   size="small"
                 />
                 <Chip label={`status=${health?.status ?? '-'}`} size="small" variant="outlined" />
                 <Chip label={`dbOk=${String(health?.dbOk ?? false)}`} size="small" variant="outlined" />
                 <Chip label={`provider=${health?.provider ?? '-'}`} size="small" variant="outlined" />
-                <Chip label={`traceId=${healthQuery.data?.traceId ?? '-'}`} size="small" variant="outlined" />
+                <Chip label={`time=${health?.time ?? '-'}`} size="small" variant="outlined" />
               </Stack>
             )}
           </Paper>

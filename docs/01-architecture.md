@@ -89,7 +89,7 @@ flowchart TB
 **为什么这样分层（三条硬理由）**
 
 1. **ai 层必须独立成层**，因为它是唯一"不可靠"的依赖。把 provider 抽象、schema 校验、模板渲染全部收在这一层，上层 service 拿到的永远是"已经校验过的 DTO 或明确异常"。这样**换模型供应商只改一个实现类**，业务代码零改动——这就是能在面试里讲"可插拔"的物理证据。
-2. **domain 与 infra 分离**，是为了让**状态机与指标口径**这类"最容易写散"的逻辑有唯一归属。`GenTaskStatus`、`CaseStatus`、`ReviewAction` 是枚举 + 转移规则，放在 domain 层，任何 service 都不能绕过它直接 UPDATE 状态。
+2. **domain 与 infra 分离**，是为了让**状态机与指标口径**这类"最容易写散"的逻辑有唯一归属。状态枚举（`common.enums.TaskStatus` / `CaseStatus`）与转移规则（`TaskStateMachine`、`CaseReviewService`）分工明确：**枚举是数据，转移规则是行为**，任何 service 都不能绕过规则直接 UPDATE 状态。枚举本身收敛在 `common/enums`（见 §11.1 D-14），转移规则留在 domain/service 层。
 3. **service 层只做编排，不做解析/不做 SQL**。例如 `GenTaskService` 负责"建任务 + 拆 item + 唤醒调度"，具体怎么调模型在 `ai` 层，怎么落库在 `mapper`。这样单测可以只测 `CaseGenerateOrchestrator`，用 Mock provider 完全离线。
 
 **模块边界（package by feature，7 个业务包）**
@@ -158,7 +158,21 @@ backend/
     │   │   │   ├── PageQuery.java                  # 分页入参基类（page/size/sort，size 上限 100）
     │   │   │   ├── PageResult.java                 # 分页出参 {list,total,page,size}
     │   │   │   ├── IdGen.java                      # 雪花 ID + 业务单号生成（T+yyyyMMdd+6位）
-    │   │   │   └── JsonUtils.java                  # 统一 ObjectMapper（UTC、忽略未知字段、Long→String）
+    │   │   │   ├── JsonUtils.java                  # 统一 ObjectMapper（UTC、忽略未知字段、Long→String）
+    │   │   │   └── enums/                          # **全项目枚举唯一真源**（T02 交付）。业务包里禁止另建同义枚举
+    │   │   │       ├── CodedEnum.java              # 接口：code() + label() + sortNo()；禁止用 ordinal() 存库
+    │   │   │       ├── DocType.java                # MD / TXT / DOCX / OPENAPI_JSON（含扩展名白名单，42002 的唯一判据）
+    │   │   │       ├── ParseStatus.java            # PENDING / PARSED / FAILED
+    │   │   │       ├── TestPointStatus.java        # ACTIVE / DISABLED / SUPERSEDED
+    │   │   │       ├── CaseType.java               # FUNCTIONAL / BOUNDARY / EXCEPTION / SECURITY / PERFORMANCE / COMPATIBILITY
+    │   │   │       │                               # 注：测试点分类与用例类型**共用**本枚举（同名字段 category / case_type）
+    │   │   │       ├── RiskLevel.java              # HIGH / MEDIUM / LOW
+    │   │   │       ├── CaseStatus.java             # DRAFT / ACCEPTED / EDITED / REJECTED（采纳率分母只认后三者，见 §3.2 / §8.3）
+    │   │   │       ├── CasePriority.java           # P0 / P1 / P2 / P3
+    │   │   │       ├── TaskScene.java              # TESTPOINT_EXTRACT / CASE_GENERATE
+    │   │   │       ├── TaskStatus.java             # PENDING / RUNNING / SUCCESS / PARTIAL / FAILED / CANCELED
+    │   │   │       ├── ExecutionStatus.java        # PASSED / FAILED / SKIPPED
+    │   │   │       └── TriageSource.java           # RULE / LLM / MANUAL
     │   │   ├── config/
     │   │   │   ├── MybatisPlusConfig.java          # 分页插件、乐观锁插件、字段自动填充
     │   │   │   ├── JacksonConfig.java              # Long 序列化为 String；LocalDateTime 为 ISO-8601 UTC ★T01 已交付最小可用版本，T02 在其上扩展，禁止另建同名类
@@ -185,17 +199,16 @@ backend/
     │   │   │   ├── domain/DocSource.java           # 文档主表实体
     │   │   │   ├── domain/DocSection.java          # 文档章节（纯文本文档的切分结果）
     │   │   │   ├── domain/ApiOperation.java        # 接口操作（OpenAPI 的切分结果）
-    │   │   │   ├── domain/DocType.java             # 枚举 MD / TXT / DOCX / OPENAPI_JSON
     │   │   │   └── mapper/{DocSourceMapper,DocSectionMapper,ApiOperationMapper}.java
+    │   │   │                                          # 注：**不建 doc/domain/DocType.java**，直接复用 common/enums/DocType（见 §11.1 D-14）
     │   │   ├── testpoint/
     │   │   │   ├── controller/TestPointController.java     # 列表/编辑/启停/批量启停
     │   │   │   ├── service/TestPointService.java           # CRUD + 幂等去重 + superseded 标记
     │   │   │   ├── service/TestPointExtractService.java    # 按接口/章节维度调 LLM 抽点 + 校验 + 落库
     │   │   │   ├── domain/TestPoint.java
-    │   │   │   ├── domain/TestPointCategory.java   # FUNCTIONAL/BOUNDARY/EXCEPTION/SECURITY/PERFORMANCE/COMPATIBILITY
-    │   │   │   ├── domain/TestPointStatus.java     # ACTIVE / DISABLED / SUPERSEDED
     │   │   │   ├── dto/TestPointExtractDTO.java    # 模型输出的强类型映射（对应 testpoint.schema.json）
-    │   │   │   └── mapper/TestPointMapper.java
+    │   │   │   ├── mapper/TestPointMapper.java
+    │   │   │   └── # 注：分类与状态**不建本地枚举**，直接用 common/enums/{CaseType,TestPointStatus,RiskLevel}
     │   │   ├── aicore/
     │   │   │   ├── LlmProvider.java                # 接口：name() + supports(model) + chat(LlmRequest)
     │   │   │   ├── LlmRequest.java                 # systemPrompt/messages/temperature/maxTokens/schema/timeoutMs/traceId
@@ -225,16 +238,18 @@ backend/
     │   │   │   ├── orchestrator/CaseGenerateOrchestrator.java # 核心：渲染→调用→校验→修复→降级→落库
     │   │   │   ├── orchestrator/RetryPolicy.java           # 指数退避 + 温度递减
     │   │   │   ├── orchestrator/DegradePolicy.java         # 三档降级决策
-    │   │   │   ├── domain/{GenTask,GenTaskItem,GenTaskStatus,GenTaskItemStatus}.java
+    │   │   │   ├── domain/{GenTask,GenTaskItem}.java
+    │   │   │   │                                       # 状态一律用 common/enums/{TaskStatus,TaskScene}，不建 GenTaskStatus
     │   │   │   ├── dto/{GenTaskCreateReq,GenTaskVO,GenTaskItemVO}.java
     │   │   │   └── mapper/{GenTaskMapper,GenTaskItemMapper}.java
     │   │   ├── case/
     │   │   │   ├── controller/CaseController.java          # 列表/详情/编辑/评审/批量评审
     │   │   │   ├── service/CaseService.java                # 查询与编辑，维护 status
     │   │   │   ├── service/CaseReviewService.java          # 采纳/驳回/编辑三分支 + old/new 快照
-    │   │   │   ├── domain/{TestCase,CaseStatus,CaseReview,ReviewAction,RejectReason}.java
+    │   │   │   ├── domain/{TestCase,CaseReview,ReviewAction}.java
+    │   │   │   │                                       # status/priority/case_type 用 common/enums；RejectReason 字典实体在 system/domain
     │   │   │   ├── dto/{TestCaseVO,CaseUpdateReq,ReviewReq}.java
-    │   │   │   └── mapper/{TestCaseMapper,CaseReviewMapper,RejectReasonMapper}.java
+    │   │   │   └── mapper/{TestCaseMapper,CaseReviewMapper}.java
     │   │   ├── export/
     │   │   │   ├── controller/ExportController.java        # /api/export/cases.xlsx, /api/export/junit.java
     │   │   │   ├── service/CaseSnapshotBuilder.java        # 组装导出模型（含任务/文档元信息）
@@ -250,8 +265,9 @@ backend/
     │   │   │   ├── parser/ResultParser.java                # 接口
     │   │   │   ├── parser/JUnitXmlParser.java              # StAX 流式解析 testsuite/testcase/failure
     │   │   │   ├── parser/CsvResultParser.java             # 列名容错（class/name/status/时间）
-    │   │   │   ├── domain/{ExecutionRun,ExecutionResult,FailureCategory,ResultStatus}.java
-    │   │   │   └── mapper/{ExecutionRunMapper,ExecutionResultMapper,FailureCategoryMapper}.java
+    │   │   │   ├── domain/{ExecutionRun,ExecutionResult}.java
+    │   │   │   │                                       # status 用 common/enums/ExecutionStatus；FailureCategory 字典实体在 system/domain
+    │   │   │   └── mapper/{ExecutionRunMapper,ExecutionResultMapper}.java
     │   │   ├── metrics/
     │   │   │   ├── controller/MetricsController.java       # overview/acceptance/cost/quality
     │   │   │   ├── service/MetricsService.java             # 采纳率、编辑率、失败率、耗时 p50/p95
@@ -261,11 +277,17 @@ backend/
     │   │   │   ├── dto/{OverviewVO,AcceptancePointVO,CostPointVO,QualityVO}.java
     │   │   │   └── mapper/{ModelPriceMapper,MetricSnapshotMapper}.java
     │   │   │                                               # 注：LlmCallLog 实体与 mapper 已移至 aicore/log（见 §11.1 D-10）
-    │   │   ├── system/
+    │   │   ├── system/                             # 系统与字典：**只读字典的唯一归属地**（T02 交付）
     │   │   │   ├── HealthController.java           # GET /api/health（不鉴权）★T01 新增（不在 T02 范围内）。
     │   │   │   │                                   # 后续扩展只加 dbOk/provider 探测，禁止重写路由
-    │   │   │   ├── ConfigController.java           # GET /api/config/public（前端需要的枚举字典）
-    │   │   │   └── DictController.java             # GET /api/dict/reject-reasons, /api/dict/failure-categories
+    │   │   │   ├── ConfigController.java           # GET /api/config/public（前端需要的枚举字典与开关）
+    │   │   │   ├── DictController.java             # GET /api/dict/reject-reasons, /api/dict/failure-categories
+    │   │   │   ├── domain/{RejectReason,FailureCategory}.java   # 两张字典表的实体（code/label/category|severity/sortNo/enabled）
+    │   │   │   ├── mapper/{RejectReasonMapper,FailureCategoryMapper}.java  # 仅被 system 内部与 metrics 只读引用
+    │   │   │   ├── service/ConfigService.java      # 白名单化输出公开配置（禁止整包 dump）
+    │   │   │   ├── service/DictService.java        # 字典全量查询 + 本地缓存（TTL 5min）
+    │   │   │   └── dto/PublicConfigVO.java         # /api/config/public 的出参契约
+    │   │   │                                       # 注：case / execution 包**不要**再建 RejectReason/FailureCategory/Mapper（见 §11.1 D-15）
     │   │   └── logging/TraceFilter.java            # 生成 traceId 注入 MDC，响应头 X-Trace-Id
     │   │                                           # ★T01 已交付最小可用版本，T02 在其上扩展，禁止另建同名类
     │   └── resources/
@@ -675,7 +697,9 @@ erDiagram
 | 可变业务表（9 张）<br/>`app_user` `doc_source` `test_point` `prompt_template` `gen_task` `gen_task_item` `test_case` `model_price` `execution_run` | ✅ `DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)` | ✅ `DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)` | 由 `MetaObjectHandler` 自动填充，**业务代码禁止手写** |
 | 只追加表（6 张）<br/>`doc_section` `api_operation` `case_review` `llm_call_log` `execution_result` `metric_snapshot` | ✅ 同上 | ❌ **刻意不设** | 写入后语义上不可变；不设 `updated_at` 等于在表结构上承诺"这些行不会被改"，也让误改无处藏身 |
 | 静态字典表（2 张）<br/>`reject_reason` `failure_category` | ❌ 无 | ❌ 无 | 字典随 Flyway 脚本发版，不随时间演化，加时间戳只是噪音 |
-| 所有 `DATETIME(3)` 一律存 **UTC**；`DEFAULT CURRENT_TIMESTAMP(3)` 取的是**连接会话时区**的时间，故 JDBC URL 必须带 `serverTimezone=UTC`，且 Jackson 配 `spring.jackson.time-zone: UTC`。两者缺一，就会出现"写入 UTC、读出被加 8 小时"的经典错位 | | | |
+| 所有 `DATETIME(3)` 一律存 **UTC**。**注意 `DEFAULT CURRENT_TIMESTAMP(3)` 取的是「会话时区」时间，光配 `serverTimezone=UTC` 不管用**（它只告诉驱动「怎么解读 DATETIME」，不修改会话 `time_zone`）。必须三处同时锁死：① JDBC URL `connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true`（Connector/J 8.0.23+，本项目 8.4.0 满足）→ 强制会话 `time_zone='+00:00'`；② Jackson `spring.jackson.time-zone: UTC`；③ 时区相关的 DDL 默认值/手写 SQL 一律用 `UTC_TIMESTAMP(3)` 而非 `NOW(3)`。三者缺一就会出现"DDL 默认值写本地 +08、应用按 UTC 读出"→ 数据看起来在**未来 8 小时** | | | |
+
+**为什么这条值得单独记一笔**：MySQL 默认 `@@global.time_zone = SYSTEM`，开发机上是 +08。此时 `NOW(3)` = `11:31`、`UTC_TIMESTAMP(3)` = `03:31`，两者并存**不会报任何错**，只会让 `created_at` 全是"未来时间"。一旦上线到 UTC 机器，同一份代码行为又变了——所以这不是"本地环境问题"，是**口径没锁死**的问题。验证命令：`SELECT @@global.time_zone, @@session.time_zone, NOW(3), UTC_TIMESTAMP(3);`（会话应为 `+00:00`，两个时间应相同）。
 
 #### 3.2.2 软删后同文件重新上传：复用恢复，不新建
 
@@ -1065,15 +1089,15 @@ sequenceDiagram
 | ID | 任务名称 | 涉及文件（相对路径） | 依赖 | 优先级 | 验收标准 |
 |---|---|---|---|---|---|
 | **T01** | **工程骨架与基础设施** | `backend/pom.xml`<br/>`backend/src/main/resources/application.yml`<br/>`backend/src/main/resources/application-dev.yml`<br/>`backend/src/main/java/com/aittest/AiTestApplication.java`<br/>`backend/src/main/java/com/aittest/common/ApiResponse.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/config/JacksonConfig.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/logging/TraceFilter.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/system/HealthController.java`（最小可用版本）<br/>`backend/src/main/resources/db/migration/V1__schema.sql`<br/>`backend/src/main/resources/db/migration/V2__dict_and_config.sql`<br/>`frontend/package.json`<br/>`frontend/vite.config.ts`、`frontend/tsconfig.json`、`frontend/tsconfig.node.json`<br/>`frontend/tailwind.config.js`、`frontend/postcss.config.js`、`frontend/index.html`、`.env.example`<br/>`frontend/src/main.tsx`、`frontend/src/App.tsx`、`frontend/src/theme.ts`、`frontend/src/index.css`、`frontend/src/vite-env.d.ts`<br/><br/>**上述 4 个「最小可用版本」文件已交付，T02 只扩展不重写** | — | P0 | ① `mvn -q clean package` 成功，`spring-boot:run` 起得来；② Flyway 建出 17 张表（15 业务表 + 2 字典表）+ 索引 + 字典种子；③ `GET /api/health` 返回 `{code:0}`；④ `npm i && npm run dev` 页面打开无控制台报错；⑤ **MUI 与 Tailwind 同时生效**（`preflight:false`，验证 Button 样式未被重置）；⑥ vite dev proxy 到 8080 生效 |
-| **T02** | **通用基础设施与鉴权闭环** | `common/{ApiResponse ★,ErrorCode,BizException,GlobalExceptionHandler,PageQuery,PageResult,IdGen,JsonUtils}.java`<br/>`config/{MybatisPlusConfig,JacksonConfig ★,WebMvcConfig,AuthInterceptor,AsyncConfig,AiProperties,ExportProperties}.java`<br/>`auth/{AuthController,AuthService,TokenService,AuthContext}.java`<br/>`logging/TraceFilter.java ★`<br/>`system/{DictController,ConfigController}.java`<br/>`frontend/src/api/{http.ts,auth.ts}`<br/>`frontend/src/store/authStore.ts`<br/>`frontend/src/pages/Login.tsx`<br/>`frontend/src/routes/index.tsx`（骨架）<br/><br/>**★ = 已由 T01 交付，T02 只扩展不重写（覆盖即违反 §11.3 追加纪律）** | T01 | P0 | ① **上述 3 个 ★ 文件被修改时，必须保留 T01 已有的行为（`X-Trace-Id` 回写、`Long→String`、`{code,message,data,traceId}` 结构），并跑一次 `/api/health` 回归**；② 无 token 访问 `/api/docs` 返回 `40101`；③ 登录后 token 可访问，过期/篡改返回 `40102`；④ 任意异常统一输出 `{code,message,traceId}`，且响应头有 `X-Trace-Id`；⑤ Long 型 ID 在 JSON 里是字符串（断言 `typeof id === 'string'`）；⑥ `PageQuery` 的 `size>100` 自动截断为 100；⑦ 前端 401 自动清 token 跳登录页；⑧ `GET /api/dict/{type}` 与 `GET /api/config/public` 返回全量枚举字典与公开配置，**且这两个端点在鉴权白名单内（未登录可访问——它们是登录页渲染所需，否则登录页拿不到字典会死锁）** |
-| **T03** | **文档接入与解析** | `doc/controller/DocController.java`<br/>`doc/service/DocService.java`<br/>`doc/service/parser/{DocumentParser,ParserRegistry,MarkdownParser,TxtParser,DocxParser,OpenApiParser}.java`<br/>`doc/domain/{DocSource,DocSection,ApiOperation,DocType}.java`<br/>`doc/mapper/*.java`<br/>`frontend/src/api/doc.ts`、`frontend/src/types/doc.ts`<br/>`frontend/src/pages/docs/{DocList,DocUploadDialog,DocDetail}.tsx` | T02 | P0 | ① 四种格式（md/txt/docx/OpenAPI json）均能上传并解析成功；② OpenAPI 解析出 method/path/summary 且 `$ref` 深度 ≤3 层无死循环；③ 上传非白名单扩展名返回 `42002`；④ 解析异常时 `parse_status=FAILED` 且 `parse_error` 是可读中文（不是堆栈）；⑤ 同 `file_hash` 重复上传命中缓存并返回 `reused:true`；⑥ 前端能展示章节树与接口列表；⑦ **含软删恢复路径的用例**：删除文档 A → 重新上传同一文件 → 断言 `docId` 与 `doc_no` **不变**、`deleted` 回到 0、`doc_section`/`api_operation` 被覆盖而非追加（条数不翻倍）、`doc_source` 表行数不增 |
+| **T02** | **通用基础设施与鉴权闭环** | `common/{ApiResponse ★,ErrorCode,BizException,GlobalExceptionHandler,PageQuery,PageResult,IdGen,JsonUtils}.java`<br/>`common/enums/{CodedEnum,DocType,ParseStatus,TestPointStatus,CaseType,RiskLevel,CaseStatus,CasePriority,TaskScene,TaskStatus,ExecutionStatus,TriageSource}.java`（12 个，**全项目唯一枚举真源**，见 §11.1 D-14）<br/>`config/{MybatisPlusConfig,JacksonConfig ★,WebMvcConfig,AuthInterceptor,AsyncConfig,AiProperties,ExportProperties}.java`<br/>`auth/{AuthController,AuthService,TokenService,AuthContext}.java`<br/>`logging/TraceFilter.java ★`<br/>`system/{DictController,ConfigController}.java`<br/>`system/domain/{RejectReason,FailureCategory}.java`<br/>`system/mapper/{RejectReasonMapper,FailureCategoryMapper}.java`<br/>`system/service/{ConfigService,DictService}.java`<br/>`system/dto/PublicConfigVO.java`（字典归属见 §11.1 D-15）<br/>`frontend/src/api/{http.ts,auth.ts}`<br/>`frontend/src/store/authStore.ts`<br/>`frontend/src/pages/Login.tsx`<br/>`frontend/src/routes/index.tsx`（骨架）<br/><br/>**★ = 已由 T01 交付，T02 只扩展不重写（覆盖即违反 §11.3 追加纪律）** | T01 | P0 | ① **上述 3 个 ★ 文件被修改时，必须保留 T01 已有的行为（`X-Trace-Id` 回写、`Long→String`、`{code,message,data,traceId}` 结构），并跑一次 `/api/health` 回归**；② 无 token 访问 `/api/docs` 返回 `40101`；③ 登录后 token 可访问，过期/篡改返回 `40102`；④ 任意异常统一输出 `{code,message,traceId}`，且响应头有 `X-Trace-Id`；⑤ Long 型 ID 在 JSON 里是字符串（断言 `typeof id === 'string'`）；⑥ `PageQuery` 的 `size>100` 自动截断为 100；⑦ 前端 401 自动清 token 跳登录页；⑧ `GET /api/dict/{type}` 与 `GET /api/config/public` 返回全量枚举字典与公开配置，**且这两个端点在鉴权白名单内（未登录可访问——它们是登录页渲染所需，否则登录页拿不到字典会死锁）**；⑨ `common/enums` 的 12 个枚举全部 `implements CodedEnum`，且 `code()` 与 DDL 里 VARCHAR 列的取值一一对应（用 `grep -c` 核对数量） |
+| **T03** | **文档接入与解析** | `doc/controller/DocController.java`<br/>`doc/service/DocService.java`<br/>`doc/service/parser/{DocumentParser,ParserRegistry,MarkdownParser,TxtParser,DocxParser,OpenApiParser}.java`<br/>`doc/domain/{DocSource,DocSection,ApiOperation}.java`（**不含 `DocType`**，直接用 `common.enums.DocType`，见 §11.1 D-14）<br/>`doc/mapper/*.java`<br/>`frontend/src/api/doc.ts`、`frontend/src/types/doc.ts`<br/>`frontend/src/pages/docs/{DocList,DocUploadDialog,DocDetail}.tsx` | T02 | P0 | ① 四种格式（md/txt/docx/OpenAPI json）均能上传并解析成功；② OpenAPI 解析出 method/path/summary 且 `$ref` 深度 ≤3 层无死循环；③ 上传非白名单扩展名返回 `42002`（**判据只能来自 `common.enums.DocType` 的扩展名白名单，禁止在 `DocService` 里再写一份 if-else 或另建枚举**）；④ 解析异常时 `parse_status=FAILED` 且 `parse_error` 是可读中文（不是堆栈）；⑤ 同 `file_hash` 重复上传命中缓存并返回 `reused:true`（查重 SQL 必须带 `file_hash <> ''`，见 §3.2.2）；⑥ 前端能展示章节树与接口列表；⑦ **含软删恢复路径的用例**：删除文档 A → 重新上传同一文件 → 断言 `docId` 与 `doc_no` **不变**、`deleted` 回到 0、`doc_section`/`api_operation` 被覆盖而非追加（条数不翻倍）、`doc_source` 表行数不增 |
 | **T04** | **模型 Provider 抽象层 + 提示词模板体系 + 调用记账** | `aicore/{LlmProvider,LlmRequest,LlmResponse,LlmMessage,LlmUsage,LlmException}.java`<br/>`aicore/provider/{MockLlmProvider,OpenAiCompatibleProvider,LlmProviderRouter,LoggingLlmProvider}.java`<br/>`aicore/log/{LlmCallLog,LlmCallLogMapper}.java`<br/>`backend/src/main/resources/mapper/LlmCallLogMapper.xml`<br/>`aicore/structured/{StructuredOutputParser,JsonRepairer,JsonSchemaValidator}.java`<br/>`aicore/prompt/{PromptTemplateService,PromptRenderer,PromptTemplateLoader,PromptTemplate}.java`<br/>`backend/src/main/resources/prompts/{testpoint_extract.v1.md,case_generate.v1.md,case_repair.v1.md,failure_triage.v1.md}`<br/>`backend/src/main/resources/schema/{testpoint.schema.json,testcase.schema.json}`<br/>`frontend/src/api/prompt.ts`、`frontend/src/pages/prompts/PromptTemplateList.tsx` | T02 | P0 | ① `ai.provider=mock` 时**无需任何 API Key** 返回结构合法 JSON；② `ai.provider=openai-compatible` 时 base_url/api_key/model 全由配置注入，**代码零写死**，且 api_key 支持 `${ENV}` 占位；③ `StructuredOutputParser` 能处理 4 类坏输出：markdown fence、尾逗号、单引号 key、JSON 被截断到最后一个完整元素；④ schema 不合规抛 `E_SCHEMA_INVALID` 并带字段路径（如 `[2].priority`）；⑤ 启动时 4 个模板幂等 seed 到 `prompt_template`（重复启动不产生重复行）；⑥ 模板支持 `{{var}}` 渲染，缺失变量抛明确异常；⑦ **记账装饰器 `LoggingLlmProvider` 在 `mock` 与 `openai-compatible` 两种实现下，每次调用（含抛异常）都恰好落 1 条 `llm_call_log`**，字段齐全（`trace_id/scene/provider/model/prompt_tokens/completion_tokens/cost_micro/latency_ms/attempt_no/status/degraded`）；⑧ **重试时 `attempt_no` 递增而不是覆盖**（同一 item 的 3 次重试 → 3 行，`attempt_no` = 1/2/3） |
-| **T05** | **测试点抽取（结构化上下文切分）** | `testpoint/controller/TestPointController.java`<br/>`testpoint/service/{TestPointService,TestPointExtractService}.java`<br/>`testpoint/domain/{TestPoint,TestPointCategory,TestPointStatus}.java`<br/>`testpoint/dto/TestPointExtractDTO.java`<br/>`testpoint/mapper/TestPointMapper.java`<br/>`frontend/src/pages/testpoints/TestPointReviewPage.tsx`、`frontend/src/api/testpoint.ts`、`frontend/src/types/testpoint.ts` | T03, T04, T06 | P0 | ① OpenAPI 文档**按 operation 逐个调用**（断言调用次数 = operation 数，不是 1 次全量塞）；② 纯文本文档按 section 切分调用；③ 抽出的点 `category` 落在枚举内、`sourceRef` 能反查回 operation/section；④ `content_hash` 去重生效：同一文档抽取两次，测试点数量不翻倍（老点置 SUPERSEDED）；⑤ 单 operation 抽取失败不影响其他（整体仍成功）；⑥ 前端可启停/编辑/手补测试点；⑦ **`POST /api/testpoints/extract` 立即返回 `taskId`，抽取进度可经 SSE 观察**，符合 §9 决策 5（抽点与用例生成共用同一套异步引擎） |
-| **T06** | **异步任务引擎 + SSE 进度推送** | `generation/controller/GenTaskController.java`<br/>`generation/service/{GenTaskService,GenTaskDispatcher,GenTaskWorker,ProgressPublisher,SseEmitterRegistry,TaskStateMachine}.java`<br/>`generation/domain/{GenTask,GenTaskItem,GenTaskStatus,GenTaskItemStatus}.java`<br/>`generation/dto/*.java`、`generation/mapper/*.java`<br/>`backend/src/main/resources/mapper/{GenTaskMapper.xml,GenTaskItemMapper.xml}`<br/>`frontend/src/api/{task.ts,sse.ts}`、`frontend/src/hooks/useTaskStream.ts` | T04 | P0 | ① `POST /api/tasks` **立即**返回 taskId（P95 < 300ms，不阻塞等模型）；② 调度器用 `FOR UPDATE SKIP LOCKED` 认领，**8 个并发线程不重复消费同一 item**（并发测试断言每个 item 的 attempts 只 +1）；③ SSE 首帧推 `snapshot`，之后 `progress`/`item`/`done` 事件齐全；④ 客户端断开后重连能凭快照恢复进度（不依赖内存事件历史）；⑤ `POST /cancel` 后不再认领新 item，任务置 CANCELED；⑥ item 超时置 FAILED 且 `next_run_at` 按退避后移；⑦ 进程重启后 PENDING item 能被继续消费（不丢任务） |
+| **T05** | **测试点抽取（结构化上下文切分）** | `testpoint/controller/TestPointController.java`<br/>`testpoint/service/{TestPointService,TestPointExtractService}.java`<br/>`testpoint/domain/TestPoint.java`<br/>（分类与状态复用 `common.enums.{CaseType,TestPointStatus,RiskLevel}`，不另建枚举，见 §11.1 D-14）<br/>`testpoint/dto/TestPointExtractDTO.java`<br/>`testpoint/mapper/TestPointMapper.java`<br/>`frontend/src/pages/testpoints/TestPointReviewPage.tsx`、`frontend/src/api/testpoint.ts`、`frontend/src/types/testpoint.ts` | T03, T04, T06 | P0 | ① OpenAPI 文档**按 operation 逐个调用**（断言调用次数 = operation 数，不是 1 次全量塞）；② 纯文本文档按 section 切分调用；③ 抽出的点 `category` 落在枚举内、`sourceRef` 能反查回 operation/section；④ `content_hash` 去重生效：同一文档抽取两次，测试点数量不翻倍（老点置 SUPERSEDED）；⑤ 单 operation 抽取失败不影响其他（整体仍成功）；⑥ 前端可启停/编辑/手补测试点；⑦ **`POST /api/testpoints/extract` 立即返回 `taskId`，抽取进度可经 SSE 观察**，符合 §9 决策 5（抽点与用例生成共用同一套异步引擎） |
+| **T06** | **异步任务引擎 + SSE 进度推送** | `generation/controller/GenTaskController.java`<br/>`generation/service/{GenTaskService,GenTaskDispatcher,GenTaskWorker,ProgressPublisher,SseEmitterRegistry,TaskStateMachine}.java`<br/>`generation/domain/{GenTask,GenTaskItem}.java`<br/>（状态复用 `common.enums.{TaskStatus,TaskScene}`，不另建 `GenTaskStatus` / `GenTaskItemStatus`，见 §11.1 D-14）<br/>`generation/dto/*.java`、`generation/mapper/*.java`<br/>`backend/src/main/resources/mapper/{GenTaskMapper.xml,GenTaskItemMapper.xml}`<br/>`frontend/src/api/{task.ts,sse.ts}`、`frontend/src/hooks/useTaskStream.ts` | T04 | P0 | ① `POST /api/tasks` **立即**返回 taskId（P95 < 300ms，不阻塞等模型）；② 调度器用 `FOR UPDATE SKIP LOCKED` 认领，**8 个并发线程不重复消费同一 item**（并发测试断言每个 item 的 attempts 只 +1）；③ SSE 首帧推 `snapshot`，之后 `progress`/`item`/`done` 事件齐全；④ 客户端断开后重连能凭快照恢复进度（不依赖内存事件历史）；⑤ `POST /cancel` 后不再认领新 item，任务置 CANCELED；⑥ item 超时置 FAILED 且 `next_run_at` 按退避后移；⑦ 进程重启后 PENDING item 能被继续消费（不丢任务） |
 | **T07** | **用例生成编排（重试 + 多级降级）** | `generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}.java`<br/>`case/domain/{TestCase,CaseStatus}.java`<br/>`case/mapper/TestCaseMapper.java`<br/>`backend/src/main/resources/mapper/TestCaseMapper.xml`<br/>`frontend/src/pages/tasks/{TaskList,TaskCreateDialog,TaskDetail,ProgressTimeline}.tsx` | T05, T06 | P0 | ① mock provider 下全链路跑出用例，N 个测试点 → ≥N 条用例；② 每个 item 的 `attempts`、`prompt_tokens`、`cost_micro`、`latency_ms` 正确回写；③ **三档降级可复现**：构造坏 JSON → 走 repair 重试（attempts>1）；构造持续坏 → 走宽松解析落库且 `confidence=0.5`；构造上游 500 → 走 provider 重试后置 FAILED；④ 部分 item 失败时任务终态是 **PARTIAL 而非 FAILED**；⑤ **验证 T04 的记账装饰器在编排链路中被真实触发**：每条成功 item 对应 ≥1 条 `llm_call_log`，重试 item 按 `attempt_no` 递增可见（记账本身由 T04 负责，此处只验证"被触发"）；⑥ 用例落库带 `prompt_version`/`model`/`content_hash`；⑦ 任务详情页能看到逐 item 的耗时与错误码 |
-| **T08** | **人工评审与标注数据闭环** | `case/controller/CaseController.java`<br/>`case/service/{CaseService,CaseReviewService}.java`<br/>`case/domain/{CaseReview,ReviewAction,RejectReason}.java`<br/>`case/dto/{TestCaseVO,CaseUpdateReq,ReviewReq}.java`<br/>`case/mapper/{CaseReviewMapper,RejectReasonMapper}.java`<br/>`frontend/src/pages/cases/{CaseBoard,CaseReviewDrawer,RejectReasonPicker}.tsx`、`frontend/src/api/cases.ts`、`frontend/src/types/cases.ts` | T07 | P0 | ① 采纳/驳回/编辑都落 `case_review` 并同步更新 `test_case.status`；② 驳回**必须**选字典原因码（不传返回 `40002`），自由文本选填；③ 编辑保存 `old_content`/`new_content` 完整快照（可 diff）；④ 批量评审返回 `{updated, skipped}`，跳过原因可查（如已终态）；⑤ 同一用例多次评审**只追加不覆盖**，当前状态取最后一条；⑥ 评审看板支持键盘快捷键（A 采纳 / R 驳回 / E 编辑）与自动下一条 |
+| **T08** | **人工评审与标注数据闭环** | `case/controller/CaseController.java`<br/>`case/service/{CaseService,CaseReviewService}.java`<br/>`case/domain/{CaseReview,ReviewAction}.java`<br/>`case/dto/{TestCaseVO,CaseUpdateReq,ReviewReq}.java`<br/>`case/mapper/CaseReviewMapper.java`<br/>（`RejectReason` 实体与 mapper **已在 T02 归入 `system/`**，本任务只读引用，见 §11.1 D-15）<br/>`frontend/src/pages/cases/{CaseBoard,CaseReviewDrawer,RejectReasonPicker}.tsx`、`frontend/src/api/cases.ts`、`frontend/src/types/cases.ts` | T07 | P0 | ① 采纳/驳回/编辑都落 `case_review` 并同步更新 `test_case.status`；② 驳回**必须**选字典原因码（不传返回 `40002`），自由文本选填；③ 编辑保存 `old_content`/`new_content` 完整快照（可 diff）；④ 批量评审返回 `{updated, skipped}`，跳过原因可查（如已终态）；⑤ 同一用例多次评审**只追加不覆盖**，当前状态取最后一条；⑥ 评审看板支持键盘快捷键（A 采纳 / R 驳回 / E 编辑）与自动下一条 |
 | **T09** | **用例导出（Excel + JUnit 5 骨架）** | `export/controller/ExportController.java`<br/>`export/service/{CaseSnapshotBuilder,ExcelExportService,JUnitExportService}.java`<br/>`export/support/{JUnitNaming,ExcelColumnDef}.java`<br/>`frontend/src/pages/cases/CaseExportDialog.tsx`、`frontend/src/api/exportApi.ts` | T08 | P1 | ① `cases.xlsx` 可被 Excel/WPS 正常打开，含「用例」「统计」两个 sheet，中文不乱码；② 默认只导 ACCEPTED/EDITED，可通过 `statuses` 覆盖；③ JUnit 导出的 `.java` **能通过 `javac` 编译**（含中文 `@DisplayName` 正确转义）；④ 类名/方法名符合 Java 标识符规范（中文标题被转成拼音或 `case_001`，不留非法字符）；⑤ 空用例集返回 `40003` 而不是下载空文件；⑥ 导出文件名带任务号与时间戳 |
-| **T10** | **执行结果导入与失败归因** | `execution/controller/ExecutionController.java`<br/>`execution/service/{ExecutionImportService,FailureTriageService,FailureStatsService}.java`<br/>`execution/parser/{ResultParser,JUnitXmlParser,CsvResultParser}.java`<br/>`execution/domain/{ExecutionRun,ExecutionResult,FailureCategory,ResultStatus}.java`<br/>`execution/mapper/*.java`<br/>`frontend/src/pages/execution/{ExecutionList,ExecutionDetail,FailurePie}.tsx`、`frontend/src/api/execution.ts` | T08 | P1 | ① JUnit XML 与 CSV 都能导入并正确统计 total/passed/failed/skipped；② 大文件用 StAX 流式解析，50MB 文件不 OOM；③ 按 `classname+name` 映射到 `test_case`，页面展示**映射率**；④ 规则归因覆盖 TIMEOUT/ASSERTION/ENV/DEPENDENCY/DATA/UNKNOWN 六类；⑤ 归因结果允许人工纠正且 `triage_source` 变为 MANUAL；⑥ 失败分布饼图与明细表数据一致（同一 SQL 口径） |
+| **T10** | **执行结果导入与失败归因** | `execution/controller/ExecutionController.java`<br/>`execution/service/{ExecutionImportService,FailureTriageService,FailureStatsService}.java`<br/>`execution/parser/{ResultParser,JUnitXmlParser,CsvResultParser}.java`<br/>`execution/domain/{ExecutionRun,ExecutionResult}.java`<br/>（状态复用 `common.enums.ExecutionStatus`；`FailureCategory` 字典实体已在 T02 归入 `system/`，本任务只读引用，见 §11.1 D-14 / D-15）<br/>`execution/mapper/*.java`<br/>`frontend/src/pages/execution/{ExecutionList,ExecutionDetail,FailurePie}.tsx`、`frontend/src/api/execution.ts` | T08 | P1 | ① JUnit XML 与 CSV 都能导入并正确统计 total/passed/failed/skipped；② 大文件用 StAX 流式解析，50MB 文件不 OOM；③ 按 `classname+name` 映射到 `test_case`，页面展示**映射率**；④ 规则归因覆盖 TIMEOUT/ASSERTION/ENV/DEPENDENCY/DATA/UNKNOWN 六类；⑤ 归因结果允许人工纠正且 `triage_source` 变为 MANUAL；⑥ 失败分布饼图与明细表数据一致（同一 SQL 口径） |
 | **T11** | **指标与成本看板** | `metrics/controller/MetricsController.java`<br/>`metrics/service/{MetricsService,CostService,ModelPriceService}.java`<br/>`metrics/domain/{ModelPrice,MetricSnapshot}.java`<br/>`metrics/dto/{OverviewVO,AcceptancePointVO,CostPointVO,QualityVO}.java`<br/>`metrics/mapper/*.java`、`backend/src/main/resources/mapper/MetricsMapper.xml`<br/>`frontend/src/pages/metrics/{OverviewDashboard,AcceptanceChart,CostChart}.tsx`、`frontend/src/api/metrics.ts`<br/><br/>**注**：`LlmCallLog` 实体/mapper 已由 T04 交付（见 §11.1 D-10），本任务**只读聚合**，不重复创建 | T07, T08, T10 | P0 | ① 采纳率口径与 §8.3 完全一致（**分母不含 DRAFT**），构造"3 采纳 1 编辑 2 驳回 4 未评审"数据，断言 accept_rate = 4/6 且 edited_rate = 1/6；② 驳回原因分布只按 `code` 聚合，未知归 OTHER；③ 成本按 task/day/model 三视角求和**与 `llm_call_log` 直接求和完全相等**（差值为 0）；④ 单用例成本 = 总成本 / 已采纳用例数，分母为 0 时返回 0 不返回 NaN；⑤ 所有指标接口支持 `from/to`，默认近 7 天；⑥ 耗时给出 p50/p95（用 SQL 近似或应用层排序） |
 | **T12** | **前端集成与交互打磨** | `frontend/src/components/layout/{AppShell,SideNav,TopBar}.tsx`<br/>`frontend/src/components/common/{DataTable,StatusChip,EmptyState,ErrorBoundary,ConfirmDialog,JsonViewer,PageHeader}.tsx`<br/>`frontend/src/components/charts/ChartCard.tsx`<br/>`frontend/src/routes/index.tsx`（完整路由 + 守卫；T02 建骨架，T12 补全）<br/>`frontend/src/hooks/{usePagedQuery,useDict}.ts`<br/>各页面接入统一组件 | T03, T05, T07, T08, T09, T10, T11 | P1 | ① 6 个模块全部可从左侧导航进入，URL 可直达可刷新；② 所有异步请求有 loading（骨架屏）/ error（重试按钮）/ empty（引导文案）三态；③ 全局错误统一走 `enqueueSnackbar`，不出现 `alert`；④ 表格分页/排序/筛选与后端 `PageQuery` 严格对齐；⑤ `tsc --noEmit` 零错误；⑥ 1280px 与 1920px 下布局无错位、无横向滚动条 |
 | **T13** | **质量保障：单元 + 集成测试** | `backend/src/test/java/com/aittest/doc/{DocxParserTest,OpenApiParserTest}.java`<br/>`aicore/{StructuredOutputParserTest,MockProviderTest}.java`<br/>`generation/CaseGenerateOrchestratorTest.java`<br/>`metrics/MetricsServiceTest.java`<br/>`export/JUnitExportServiceTest.java`<br/>`backend/src/test/java/com/aittest/api/ApiSmokeIT.java`<br/>`backend/src/test/resources/{application-test.yml,fixtures/*}`<br/>`frontend/vitest.config.ts` + `frontend/src/**/__tests__/*.test.tsx` | T12 | P1 | ① `mvn test` 全绿，且覆盖：坏 JSON 修复 4 类、三档降级分支、采纳率口径、JUnit 生成可编译；② `ApiSmokeIT` 用 mock provider 跑通「上传→抽点→生成→评审→导出→导入→指标」全链路并断言关键数值；③ 测试**不依赖外网、不需要 API Key**（CI 友好）；④ 前端至少 3 个组件测试（CaseBoard 的键盘评审、StatusChip 色板、DataTable 分页） |
@@ -1134,6 +1158,7 @@ graph LR
 | `org.springframework.boot:spring-boot-starter-validation` | 3.3.5 | `@Valid` / JSR-380 参数校验 |
 | `org.springframework.boot:spring-boot-starter-actuator` | 3.3.5 | 健康检查与指标端点 |
 | `com.baomidou:mybatis-plus-spring-boot3-starter` | 3.5.9 | ORM、分页插件、乐观锁、雪花 ID |
+| `com.baomidou:mybatis-plus-jsqlparser` | 3.5.9（同版本，勿单独升级） | **3.5.9 起 JSqlParser 被拆成独立模块**，只引 starter 时 `PaginationInnerInterceptor` / `OptimisticLockerInnerInterceptor` 会**编译不过**（找不到 JSqlParser 符号）。T05/T06/T08/T11 只要用到分页或乐观锁都依赖它——**代码检查报"未使用"时不要删**，删了必崩 |
 | `com.mysql:mysql-connector-j` | 8.4.0 | MySQL 驱动 |
 | `org.flywaydb:flyway-core` + `flyway-mysql` | 10.17.0 | 版本化建表与种子数据 |
 | `org.projectlombok:lombok` | 1.18.34 | 减少样板代码（provided） |
@@ -1200,8 +1225,9 @@ graph LR
 - 成功：`code = 0`，`message = "ok"`，`data` 可为对象/数组/null。
 - **`data` 字段必须始终出现在 JSON 里（即使为 `null`）**：`ApiResponse` 用 `@JsonInclude(ALWAYS)` 锁定，前端 axios 拦截器靠"`data` 键是否存在"判断响应体 schema 是否一致。**禁止**改成 `NON_NULL`——那会让 `{"code":0,"message":"ok","traceId":"..."}` 缺 `data`，前端解包拿到 `undefined` 而不是 `null`，`data.length` 之类判空会抛 `TypeError`。
 - **`traceId` 依赖 MDC 键名常量 `TraceFilter.MDC_TRACE_ID = "traceId"`**：`ApiResponse.currentTraceId()` 从 MDC 取这个键。改名不会编译报错，只会让所有响应的 `traceId` **静默变成空串**——排查链路直接断掉。T02 扩展 `TraceFilter` 时不要动这个常量名与 finally 清理逻辑。
+- **禁止在 `ApiResponse` 上加任何会形成 getter 的新方法**（如 `isSuccess()` / `getOK()` / `hasData()`），除非同时加 `@JsonIgnore`。原因：Jackson 默认按 getter 反射序列化，`isSuccess()` 会**凭空多出一个 `"success": true` 字段**。实测代价：`/api/health` 响应体从 4 个字段变成 5 个，而前端按"字段数恒定"写的 schema 断言直接红掉，排查方向却会先怀疑拦截器。加工具方法请一律标 `@JsonIgnore`，或改成 `static` 工具。
 - 失败：`code != 0`，`message` 为**面向用户的中文**（可直接 toast），技术细节只进日志。
-- HTTP 状态码策略：业务错误统一 `200` + `code!=0`（前端 axios 拦截器按 `code` 判断）；**仅**鉴权失败用 `401`、未找到用 `404`、限流用 `429` 以兼容网关与浏览器行为。
+- HTTP 状态码策略：业务错误统一 `200` + `code!=0`（前端 axios 拦截器按 `code` 判断）；**仅**鉴权失败用 `401`、未找到用 `404`、限流用 `429` 以兼容网关与浏览器行为。**注意 Spring 6.1 起静态资源/路由不匹配走的是两条不同异常**：`NoHandlerFoundException`（需 `spring.mvc.throw-exception-if-no-handler-found: true`）与 `NoResourceFoundException`（`spring.web.resources.add-mappings: false` 时抛）。`GlobalExceptionHandler` **必须两个都接**并统一映射为 `40401`，只接前者会让不存在的路径返回 Spring 默认错误页（HTML + `{"timestamp",...}`，前端解包直接崩）。
 
 | code | 常量 | 含义 | 前端处置 |
 |---|---|---|---|
@@ -1232,7 +1258,7 @@ graph LR
 |---|---|
 | 主键 | MyBatis-Plus 雪花 `bigint`。雪花策略在 `application.yml` 的 `mybatis-plus.global-config.db-config.id-type: assign_id` **全局声明**，实体上只需 `@TableId`（不必逐个写 `type`，但写了也不冲突）；**JSON 一律序列化为字符串**（`JacksonConfig` 全局注册 `Long → ToStringSerializer`），前端 TS 类型定义为 `string` |
 | 业务单号 | `IdGen.docNo()` → `D20261107-000123`；`taskNo()` → `T20261107-000123`；`runNo()` → `R20261107-000123`（日期 + 当日 6 位自增，用 DB 唯一索引兜底冲突重试） |
-| 数据库时间 | 所有 `datetime(3)` 字段**存 UTC**（JDBC `serverTimezone=UTC` + Jackson `time-zone: UTC` 双处锁死）；`created_at` **全表必有**；`updated_at` **仅 9 张可变表有**，只追加表与字典表刻意不设（见 §3.2.1）。两者均由 `MetaObjectHandler` 自动填充，**业务代码禁止手写**；DDL 侧另有 `DEFAULT CURRENT_TIMESTAMP(3) [ON UPDATE ...]` 兜底，绕过 ORM 的批量 SQL 也不会漏填 |
+| 数据库时间 | 所有 `datetime(3)` 字段**存 UTC**。锁死口径要**三处**：JDBC `connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true`（强制会话 `time_zone='+00:00'`）＋ Jackson `time-zone: UTC` ＋ DDL 默认值/手写 SQL 用 `UTC_TIMESTAMP(3)`。**只配 `serverTimezone=UTC` 是不够的**——它不改会话时区，DDL 默认值照样写本地时间（详见 §3.2.1）。`created_at` **全表必有**；`updated_at` **仅 9 张可变表有**，只追加表与字典表刻意不设。两者均由 `MetaObjectHandler` 自动填充，**业务代码禁止手写**；DDL 侧另有 `DEFAULT CURRENT_TIMESTAMP(3) [ON UPDATE ...]` 兜底，绕过 ORM 的批量 SQL 也不会漏填 |
 | 软删 | 只有 `doc_source` 有 `deleted` 字段，由 MyBatis-Plus 逻辑删除接管（`logic-delete-field: deleted` / `1` / `0`）。**含义**：`BaseMapper` 的 `selectById`/`updateById`/`deleteById` 自动带条件；但**手写 XML 的聚合与存在性校验必须自己加 `deleted = 0`**，否则会把已删文档的用例算进指标 |
 | API 时间 | Jackson 全局 `WRITE_DATES_AS_TIMESTAMPS=false`，格式 `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`；前端 dayjs 转 `Asia/Shanghai` 展示 |
 | 统计口径时间 | 指标接口的 `from/to` 按**用户本地日期**（`Asia/Shanghai`）解析后再转 UTC 查库，避免"昨天的数据算到今天"这类争议 |
@@ -1353,6 +1379,16 @@ spring:
 | `DB_PASSWORD` | `${DB_PASSWORD:}` | **空字符串**（本地 root 空密码可直接跑） | ✅ **禁止入库** |
 | `SPRING_PROFILES_ACTIVE` | `${SPRING_PROFILES_ACTIVE:dev}` | `dev` | ❌ |
 | `SERVER_PORT` | `${SERVER_PORT:8080}` | `8080` | ❌ |
+| `AUTH_TOKEN_SECRET` | `${AUTH_TOKEN_SECRET:}` | **空 → 启动期生成一次性随机密钥并 WARN**（克隆即跑；代价是重启后旧 token 全失效） | ✅ **禁止入库** |
+| `AUTH_TOKEN_TTL_HOURS` | `${AUTH_TOKEN_TTL_HOURS:168}` | 168（7 天） | ❌ |
+| `EXPORT_MAX_ROWS` | `${EXPORT_MAX_ROWS:5000}` | 5000（单次导出行数上限，防 OOM） | ❌ |
+| `EXPORT_TEMP_DIR` | `${EXPORT_TEMP_DIR:exports}` | `exports`（相对后端工作目录；JUnit zip 的临时落盘位置） | ❌ |
+| `EXPORT_JUNIT_PACKAGE` | `${EXPORT_JUNIT_PACKAGE:com.aittest.generated}` | `com.aittest.generated`（生成的 JUnit 5 骨架的默认包名，T09 可被请求参数覆盖） | ❌ |
+| `EXPORT_JUNIT_TIMEOUT_SECONDS` | `${EXPORT_JUNIT_TIMEOUT_SECONDS:30}` | 30（单个 JUnit 方法骨架的 `@Timeout` 缺省值） | ❌ |
+
+**`AUTH_TOKEN_SECRET` 空值降级的取舍**：允许为空是刻意的——否则新克隆的仓库第一步就起不来，违背"零配置可跑"。但代价必须明确：**每次重启都会重新生成密钥，已签发的 token 全部失效**（演示时表现为"刚登录又被打回登录页"）。生产由 `application-prod.yml`（T14）用 `${AUTH_TOKEN_SECRET}` 无默认值形式强制注入，缺失即启动失败。
+
+**`EXPORT_TEMP_DIR` 的坑**：它是**相对路径**，解析基准是**后端进程的工作目录**（`mvn spring-boot:run` 时是 `backend/`，`java -jar` 时是启动目录）。所以"从仓库根启动"和"从 `backend/` 启动"会落到两个不同目录。T09 实现时应 `Path.of(dir).toAbsolutePath()` 并在启动日志里打一行实际绝对路径，否则"导出的 zip 找不到"会查很久。
 
 **`AI_MODEL` 的缺省值必须是 `mock-model`，不能是空串**——`V2__dict_and_config.sql` 的 `model_price` 种子行里 mock 的 `model` 正是 `mock-model`（单价 0/0）。若缺省为空串，`llm_call_log.model = ''` 与 `model_price.model` 关联不上 → 成本归集查不到单价，mock 演示的成本恒为 0 且**看不出是"算对了"还是"没算"**。这属于"明确非敏感值"，不违反下面"禁止默认密码/Key"的硬约束。
 
@@ -1421,7 +1457,7 @@ spring:
 | 是否引入了 PRD 之外的功能 | ✅ 未引入；仅新增 `system/dict` 只读接口（服务前端枚举，属必要基础设施） |
 | 是否引入 Redis/MQ/外部中间件 | ✅ 无。队列=MySQL 表，推送=SSE，缓存=进程内 |
 | 指标口径是否可被 SQL 直接验证 | ✅ §8.3 全部为 `count`/`sum` 表达式，无模糊表述 |
-| 实施偏差是否留档 | ✅ §11 逐项记录 **11 条**偏差（D-01~D-11：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、1 个文档表格与 yml 漂移） |
+| 实施偏差是否留档 | ✅ §11 逐项记录 **15 条**偏差（D-01~D-15：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、2 个文档表格与配置漂移、1 个时区配置不足、1 个运行期可选依赖、1 个枚举单一真源收敛、1 个字典归属调整） |
 
 ---
 
@@ -1429,7 +1465,7 @@ spring:
 
 > **用途**：设计与代码一旦分叉，三个月后没人分得清哪个是对的。本表是**唯一的仲裁记录**：凡"文档写 A、代码是 B"的情况，先查这里；表里没有的，一律以文档为准并视为 bug。
 >
-> 当前覆盖 **T01 工程骨架与基础设施**。后续每个任务验收时追加本节，不新建文件（保持"唯一真源"）。
+> 当前覆盖 **T01 工程骨架与基础设施**、**T02 通用基础设施与鉴权闭环**。后续每个任务验收时追加本节，不新建文件（保持"唯一真源"）。
 
 ### 11.1 偏差清单
 
@@ -1445,9 +1481,13 @@ spring:
 | **D-08** | `V1__schema.sql` / `V2__dict_and_config.sql` 的布尔型列 | 草稿口径写作 `TINYINT(1)` | 全库 **8 个**布尔列统一写作 `TINYINT`，`TINYINT(1)` 出现 **0 次**：`enabled` ×4（`app_user` / `model_price` / `reject_reason` / `failure_category`）、`deleted` ×1、`is_active` ×1、`degraded` ×2 | MySQL 8.0.17 起**显示宽度对整数类型已废弃**，8.0.19+ 写 `TINYINT(1)` 会告警并被改写；`(1)` 与 `(4)` 存储完全相同 | 无功能影响。§3.1 ER 用 `tinyint` 表述，与实际 DDL 一致。**唯一注意点**：MySQL Connector/J 仍会把 `TINYINT(1)` 优先映射为 `Boolean`，而 `TINYINT` 映射为 `Byte`/`Integer`——本项目实体统一用 `Integer`（0/1）而非 `Boolean`，避免"有人好心把 DDL 改成 `TINYINT(1)`、导致 DAO 反序列化炸掉" |
 | **D-09** | `backend/src/main/resources/application-prod.yml`<br/>同步 §2.2 | §2.2 目录树列出该文件（"真实 provider，密钥走环境变量"） | **T01 未创建，文件不存在**。由 **T14** 承接交付；§2.2 已标注「T14 交付：生产 profile，密钥全部走环境变量，禁止任何默认值兜底」 | T01 阶段创建它没有意义：T02 才引入鉴权配置、T04 才引入 provider 配置，此时写 prod profile 只能是空壳；而空壳文件最危险——它会让人误以为"生产配置已就绪" | 不影响本机与 dev 启动（`spring.profiles.active` 默认 `dev`）。**风险点**：若 T14 漏交付，生产环境会静默使用 dev 的默认值。缓解：T14 验收必须包含"`--spring.profiles.active=prod` 且不提供 `DB_PASSWORD` 时启动失败" |
 | **D-10** | `LlmCallLog` 实体归属<br/>同步 §2.2、§6 的 T04 / T07 / T11 | 实体 `metrics/domain/LlmCallLog.java` + `metrics/mapper/LlmCallLogMapper.java` 由 **T11** 创建；记账写在 T07 验收里 | 实体与 mapper 移至 **`aicore/log/`**、由 **T04** 交付；新增 `aicore/provider/LoggingLlmProvider`（**装饰器**包住真实 provider，成功与异常**都**写一条台账）。T07 验收⑤ 改为"验证装饰器被真实触发"，T11 只读聚合 | **职责倒挂 + 成环**。① 倒挂：台账是 AI 调用的副产物，`aicore` 若不负责记账就无法独立观测，成本也要等到 T11 才能验证；② 成环：T07 验收要求写台账，但 mapper 在 T11，而 T11 依赖 T07 → 给 T07 加 `→T11` 即环。装饰器还顺带统一了 mock 与真实 provider 的记账口径，避免两处各写一遍 | T11 的 `CostService` 改为读 `aicore/log/LlmCallLogMapper`（跨包只读，不反向依赖）；`llm_call_log` 表结构不变。**注意**：`aicore` 因此多了对 `llm_call_log` 表的依赖，但这仍是"基础设施"而非"业务模块"，不违反 §1.3 的单向依赖约束 |
-| **D-11** | §8.8「键名↔占位符对照表」<br/>（文档自身写错，代码为准） | 表中写 `AI_MODEL` → `${AI_MODEL:}`（缺省空串）；且**整表漏了 `SERVER_PORT` 这一行** | 按实际 `application.yml` 更正：`AI_MODEL` → `${AI_MODEL:mock-model}`；补 `SERVER_PORT` → `${SERVER_PORT:8080}` 一行，并附端口劫持的坑 | ① `V2__dict_and_config.sql` 的 `model_price` 种子里 mock 的 `model` 就是 **`mock-model`**（单价 0/0）。缺省空串会让 `llm_call_log.model = ''` 与 `model_price.model` 关联不上，成本恒为 0 且**分不清是"算对了"还是"没算"**；② 漏 `SERVER_PORT` 是 §11.1 D-07 那个端口劫持的直接诱因，最该写进共享知识的一条反而没写 | 仅文档。§8.8 对照表现在 **10 行覆盖 15 个真实占位符键**（`AI_TEMPERATURE_*` 三键合并为一行），与 `application.yml` 逐个核对一致（自查命令见本表下方 §11.1 备注） |
+| **D-11** | §8.8「键名↔占位符对照表」<br/>（文档自身写错，代码为准） | 表中写 `AI_MODEL` → `${AI_MODEL:}`（缺省空串）；且**整表漏了 `SERVER_PORT` 这一行** | 按实际 `application.yml` 更正：`AI_MODEL` → `${AI_MODEL:mock-model}`；补 `SERVER_PORT` → `${SERVER_PORT:8080}` 一行，并附端口劫持的坑 | ① `V2__dict_and_config.sql` 的 `model_price` 种子里 mock 的 `model` 就是 **`mock-model`**（单价 0/0）。缺省空串会让 `llm_call_log.model = ''` 与 `model_price.model` 关联不上，成本恒为 0 且**分不清是"算对了"还是"没算"**；② 漏 `SERVER_PORT` 是 §11.1 D-07 那个端口劫持的直接诱因，最该写进共享知识的一条反而没写 | 仅文档。§8.8 对照表现在 **16 行覆盖 21 个真实占位符键**（`AI_TEMPERATURE_*` 三键合并为一行），与 `application.yml` 逐个核对一致（自查命令与期望输出见本表下方 §11.1 备注） |
+| **D-12** | `application.yml` → JDBC URL<br/>同步 §3.2.1、§8.2 | §3.2.1 只写「JDBC URL 加 `serverTimezone=UTC`」，并断言这样就够了 | **不够。** 实配为 `serverTimezone=UTC&**connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true**`，并**配套**两件事：Jackson `spring.jackson.time-zone: UTC`、SQL 里一律 `UTC_TIMESTAMP(3)` 而非 `NOW(3)`。三者缺一，时区就会歪 | **`serverTimezone` 只是"告诉驱动怎么解读"，不是"命令服务端用哪个时区"。** MySQL 8 的 `serverTimezone` 已被 `connectionTimeZone` 取代（前者只是别名），且默认不改变会话时区——会话仍跟随 `@@global.time_zone`（本机实测为 `SYSTEM`，即东八区）。于是 `NOW(3)` 落库的是本地时间、`created_at DEFAULT CURRENT_TIMESTAMP` 也是本地时间，而 Java 侧按 UTC 解读 → **同一行数据被平移 8 小时**。`forceConnectionTimeZoneToSession=true` 才真正 `SET time_zone='+00:00'`。实测：`NOW(3)=11:31` vs `UTC_TIMESTAMP(3)=03:31`，差整 8 小时 | **必须三处同时锁**：连接（本行）+ 序列化（Jackson）+ 生成（`UTC_TIMESTAMP(3)` / `DEFAULT (UTC_TIMESTAMP(3))`）。验收口径：同一事务内 `SELECT created_at, UTC_TIMESTAMP(3)` 两值之差 < 2 秒；前端显示 `2024-01-01T03:31:00.000Z` 而非 `11:31`。**最容易漏的是 `DEFAULT CURRENT_TIMESTAMP`** —— 它由服务端求值，连接层改了也管不到，故建表时若列有默认值必须写成 `DEFAULT (UTC_TIMESTAMP(3))` |
+| **D-13** | `backend/pom.xml` → `mybatis-plus-jsqlparser`<br/>同步 §7.1 | §7.1 依赖清单只有 `mybatis-plus-spring-boot3-starter` | 新增 **`com.baomidou:mybatis-plus-jsqlparser`**（版本由 MyBatis-Plus BOM 管理，不写死）。**IDE / `mvn dependency:analyze` 报「未使用」是误报，不许删** | MyBatis-Plus 3.5.9 起把 JSqlParser 拆成**可选依赖**（为了瘦身）。而分页插件 `PaginationInnerInterceptor` 在运行期要**靠它解析 SQL 才能改写 `LIMIT`**——编译期零引用，所以静态检查永远报「未使用」。删掉后的现象极具误导性：**编译通过、单测不涉及分页也全绿，一上分页接口就 `ClassNotFoundException: net.sf.jsqlparser...`** | 全部分页接口（§4.2 里所有 `?page=&size=` 的读接口）。验收：任一列表接口带 `page=2&size=10` 返回正确的第二页，且日志无 `NoClassDefFoundError` |
+| **D-14** | `common/enums/` 包<br/>同步 §2.2、§6 的 T03 | §2.2 在 `doc/domain/` 下写了 `DocType.java`，T03 文件清单也要求新建它 | **删除该条目。** 枚举统一收敛到 **`com.aittest.common.enums`**（T02 已交付 **12 个**：`CodedEnum` 接口 + `DocType` `ParseStatus` `TestPointStatus` `CaseType` `RiskLevel` `CaseStatus` `CasePriority` `TaskScene` `TaskStatus` `ExecutionStatus` `TriageSource`）。T03 **直接复用** `common.enums.DocType`，不新建 | **同名不同义最贵。** 若 T03 在 `doc/domain` 再建一个 `DocType`，T05/T08 里同时 import 两个同名类只是时间问题；两者一旦字段不同（比如一个带 `ext()` 白名单、一个不带），`42002` 扩展名校验就会在不同链路上表现不一致，而这种 bug **编译期不报错、只在特定入口复现**。统一到 `common/enums` 还有个附加收益：`CodedEnum` 强制 `code()/label()/sortNo()` 三件套，堵死"有人用 `ordinal()` 存库"——枚举顺序一调整，历史数据立刻错乱 | `common/enums` 成为**全项目唯一枚举真源**，业务包内**禁止**再建同义枚举。附带同步：`testpoint` 不建 `TestPointCategory`（复用 `CaseType`）、不建 `TestPointStatus`；`generation` 不建 `GenTaskStatus`（复用 `TaskStatus` / `TaskScene`）；`case` 的 `CaseStatus`、`execution` 的 `ExecutionStatus` 同理。原文「枚举写在各自 domain 包」的设计约定**作废** |
+| **D-15** | `system/` 包的职责<br/>同步 §2.2、§6 的 T02 / T08 / T10 | §2.2 的 `system/` 只有 `{HealthController, ConfigController, DictController}` 三个 controller；`RejectReason` 写在 `case/domain`，`FailureCategory` 写在 `execution/domain` | T02 实际交付 `system/` **10 个文件**：3 个 controller + `domain/{RejectReason,FailureCategory}` + `mapper/{RejectReasonMapper,FailureCategoryMapper}` + `service/{ConfigService,DictService}` + `dto/PublicConfigVO`。两个字典实体与 mapper 归 **`system`**，`case` / `execution` **只读引用，不再自建** | **字典是横切资源，不是某个业务模块的私产。** `reject_reason` 同时被 `case`（评审下拉）和 `metrics`（驳回原因归因）读，`failure_category` 同时被 `execution`（归因）和 `metrics`（失败分布）读——挂在任一业务包下都会让另一个包产生跨业务反向依赖，直接违反 §1.3 单向依赖约束。归到 `system`（基础设施层）后，业务模块与 `metrics` 都只是"读一张公共字典表"，依赖方向干净。`/api/dict/*` 与 `/api/config/public` 又必须在**鉴权白名单**内（否则登录页拿不到字典 → 拿不到字典就不能渲染 → 死锁），和字典归属同一处更便于集中维护白名单 | T08 / T10 的文件清单相应减项（不复建实体与 mapper）；§6 的 T02 文件清单补上这 4 个子包。**注意**：`LlmCallLog` 不在此列（见 D-10），它归 `aicore`，因为它是"AI 调用的副产物"而非"公共字典" |
 
-**D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 15 个键一个不漏）：
+**D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 21 个键一个不漏）：
 
 ```bash
 # 必须先滤掉注释行，否则会多出一个 ENV——
@@ -1456,7 +1496,10 @@ grep -v '^\s*#' backend/src/main/resources/application.yml \
   | grep -oE '\$\{[A-Z_]+' | sed 's/\${//' | sort -u
 ```
 
-当前期望输出 15 个键：`AI_API_KEY AI_BASE_URL AI_MODEL AI_PROVIDER AI_TEMPERATURE_GENERATE AI_TEMPERATURE_REPAIR AI_TEMPERATURE_TESTPOINT AI_TIMEOUT_SECONDS DB_HOST DB_NAME DB_PASSWORD DB_PORT DB_USERNAME SERVER_PORT SPRING_PROFILES_ACTIVE`
+当前期望输出 **21** 个键（T02 后又新增 `AUTH_*` 2 个与 `EXPORT_*` 4 个）：
+`AI_API_KEY AI_BASE_URL AI_MODEL AI_PROVIDER AI_TEMPERATURE_GENERATE AI_TEMPERATURE_REPAIR AI_TEMPERATURE_TESTPOINT AI_TIMEOUT_SECONDS AUTH_TOKEN_SECRET AUTH_TOKEN_TTL_HOURS DB_HOST DB_NAME DB_PASSWORD DB_PORT DB_USERNAME EXPORT_JUNIT_PACKAGE EXPORT_JUNIT_TIMEOUT_SECONDS EXPORT_MAX_ROWS EXPORT_TEMP_DIR SERVER_PORT SPRING_PROFILES_ACTIVE`
+
+> 对照表现在 **16 行覆盖 21 个键**（`AI_TEMPERATURE_*` 三键合一行）。
 
 ### 11.2 一条与指令不符的说明（必须留痕）
 

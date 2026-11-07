@@ -336,6 +336,47 @@
 
 ---
 
+## 2026-11-07 · 阶段 7 · T05 测试点抽取与评审
+
+### 做了什么
+
+1. `testpoint` 模块落地：`TestPoint`（14 字段）/ `TestPointHasher` / `TestPointMapper` / 8 个 DTO / `TestPointService` / `ExtractPlanner` / `TestPointExtractService` / `TestPointController`（6 个端点）。
+2. **幂等身份定为 `content_hash = sha256(doc_id + title + category)`**，分隔符用 `\0`；`description` / `riskLevel` **刻意不进哈希**。
+3. **`ExtractPlanner` 独立成类**：OpenAPI 按 `api_operation` 逐个切、纯文本按 `doc_section` 逐个切，二者不混合。
+4. **去重四态处置表**：`ACTIVE` 一字不动 / `DISABLED` 一字不动（人停用的 AI 说了不算）/ `SUPERSEDED` 复活为 `ACTIVE` / 本轮没抽到的 `ACTIVE` 置 `SUPERSEDED`（不删除）。
+5. `sourceRef` **服务端权威生成**，模型写的不落库；`category` 白名单由 `CaseType` 枚举现算。
+6. 前端 `pages/testpoints/TestPointReviewPage.tsx` + `types/testpoint.ts` + `api/testpoint.ts` + `/testpoints/:docId` 路由 + `DocDetail` 加"测试点评审"按钮。
+7. 单测 **28 条**（`TestPointHasherTest` 9 + `ExtractPlannerTest` 6 + `TestPointServiceTest` 10 + `TestPointExtractServiceTest` 3）；全量 **67 条** 0 失败。
+8. 端到端 **36 条全绿**（`D:/Temp/t05e2e.py`，mock，8097）。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 幂等身份 = `doc_id + title + category`，`description`/`riskLevel` 不进哈希 | **人会改描述**。掺进去之后，一条被人工润色过的点在下一轮抽取里永远对不上原哈希，于是"插入一条新的 + 旧的被置 SUPERSEDED"，评审页上凭空多一条、人写的内容还被顶掉 | 用全文哈希（`title+category+description`）——精确但把"人的编辑"当成了"内容变化" |
+| 哈希分隔符用 `\0` | 用字符串拼接会边界碰撞：`docId=1, title="2x"` 与 `docId=12, title="x"` 拼出同一个串 | `docId + "-" + title + "-" + category` |
+| **去重是单元级的，取代是文档级的**（D-26） | 两者**时间尺度不同**。`mergeExtraction` 按单元合并（去重、插入、复活），`supersedeMissing` 在**全单元完成后恰好调用一次**。写在一起时第 1 个单元处理完就把后面 N-1 个单元的产出标成 `SUPERSEDED`，第 2 个再救回来并反手标掉第 1 个的——互相踩，ACTIVE 数随机 | 单方法 `applyExtraction` 一次做完（**这个方案实现过，端到端验收抓出来的**） |
+| **抽取失败的单元，它已有的点必须算进 `kept`** | 取代的语义是"原文里已经没有这个点了"，而**一次模型超时并不能证明这一点**。漏掉这步，一次上游抖动就把该单元的测试点整批静默废掉——和"提前取代"是同一类事故 | 失败就不管（点会被误取代）；或"任一单元失败则整篇跳过取代"（一个永久抽挂的接口会让整篇文档永远无法清理） |
+| 失败收成 `failed(...)` 而不抛异常（验收 ⑤） | 批量要把 N 个单元的结果汇总成一份报告，抛异常只能表达"第一个失败"，后面 N-1 个的去向就没了 | 抛 `BizException` |
+| `sourceRef` 服务端生成，不采信模型写的 | 它的用途是**反查回原文**，真源是数据库外键。模型可能给 A 接口的点写上 B 接口的 `operationId` | 用模型输出的 `sourceRef` |
+| `supersedeMissing` **不删除**，只置 `SUPERSEDED` | 这些点可能已被生成的用例引用着，删了外键就断了 | 物理删除 |
+
+### 踩坑记录
+
+1. **"半个编辑"会造出编译不过但看起来改完了的文件**：`SENSITIVE_CONTENT_UNAVAILABLE` 屏蔽了那次 Edit 的返回，实际只落了 `extractDocument` 那半、`doExtract` 那半没改。**教训**：任何工具返回不可见的写操作，事后必须用 `grep` 核实关键符号是否真的落地，不能假设成功。
+2. **失败隔离的 `try/catch` 在那次半个编辑里被顺手删掉了**，类注释却还写着"失败返回 `failed(...)` 不抛异常"。结果是模型返回一次坏 JSON，整篇文档的抽取报告变成一个错误码抛给前端——前面已落库的单元白干，用户只看到"请重试"，看不出是哪个接口抽挂了。**契约写在注释里、实现在代码里，就必须有跑得快的单测盯着**（`TestPointExtractServiceTest` 即为此而生）；端到端要起服务连库，容易被跳过。
+3. **端到端脚本自己会污染自己**：`DocService` 对同名同哈希文件"命中缓存秒回"复用 `docId`，于是第二轮跑脚本时，上一轮的 `test_point`（手补点 `source_ref=''`、幽灵点 `id=900000000000000001`）全串进本轮断言——`GROUP_CONCAT(source_ref)` 冒出空前缀、主键撞车。**任何依赖"新建数据"的验收脚本，开头必须清掉自己上一轮的产物**，否则断言的是历史残留。
+4. **断言写成"每节都必须产出新点"是错的**：mock 按调用轮次循环返回内容，第三个单元抽出来的点与第一个同名同分类，被去重键判成"已存在"——**这正是设计语义**（去重身份不含来源）。该断言的应该是"每条点的 `sourceRef` 能反查回它挂的那节"，即 `source_ref = CONCAT('section:', s.seq_no)`。**关系断言 > 硬编码计数**：写死 `unitCount == 2` 的地方，改一次 fixture 就误报一片。
+5. `TestPointServiceTest` 的 `updateById(any())` 撞上 MyBatis-Plus 3.5.9 `T` / `Collection<T>` 两个重载，必须写 `any(TestPoint.class)`；断言 `never()` 的依赖不要 stub，否则 `UnnecessaryStubbingException`。
+
+### 下一步
+
+- T06 异步任务引擎：`POST /api/testpoints/extract` 现在是**同步返回报告**，验收 ⑦ 要求的 `taskId` + SSE 进度要等 T06 才能补（已在 §11.1 D-26 登记为临时契约）
+- T06 之后补：用例生成 `generation` 模块、`test_point` 与 `test_case` 的外键引用
+- 前端评审页目前只做了列表 + 编辑/启停，批量采纳与"跳到原文"待 T07
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

@@ -86,6 +86,34 @@
 
 ---
 
+## 2026-11-07 · 阶段 2.6 · 远端仓库与首次推送
+
+### 做了什么
+
+1. 在 GitHub（`rosyman666/ai-testcase-platform`）与 Gitee（`laiwenhao123666/ai-testcase-platform`）分别创建**空的公开仓库**——不勾选任何初始化文件，保证首次推送不会冲突。
+2. 配置双远程：`origin` → GitHub（主），`gitee` → Gitee（国内镜像），`main` 分支上游指向 `origin/main`。
+3. 添加本地别名 `git pushall`，一条命令同时推两端，避免手动推送时漏掉一边。
+4. 首次推送成功，两端 `refs/heads/main` 指向同一提交 `7584836`。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| GitHub 为主仓、Gitee 为镜像 | 简历与开源生态以 GitHub 为默认入口；Gitee 保证国内访问速度与备份冗余 | 只用一个平台（国内访问 GitHub 不稳定，单一平台有丢失风险） |
+| 远端仓库创建时保持为空 | 远端若有 README/LICENSE，首推会 `non-fast-forward` 被拒，需要 `--allow-unrelated-histories` 合并，历史会变脏 | 用平台模板初始化（省事但污染历史） |
+| 把代理写进仓库本地 `.git/config` | 只影响本仓库，不污染其他项目的网络配置 | 写全局配置（换网络环境时会牵连所有仓库） |
+
+### 踩坑记录
+
+- **推送全失败，报 `schannel: server closed abruptly` / `CONNECT tunnel failed, response 502`**：运行环境注入了 `HTTP_PROXY=http://127.0.0.1:59189` 这个内部代理，它不放行 github.com。定位方法：用 `curl -x <代理>` 逐个测试代理是否可用，发现本机 Clash 的 7897 端口可通。解决：`git config http.proxy http://127.0.0.1:7897`。
+- `git push -u gitee main` 之后再 `git push` 会默认推到 Gitee，而不是 GitHub——因为 `-u` 会覆盖上游。需显式 `git branch -u origin/main main` 改回。
+
+### 下一步
+
+- 阶段 3：T01 工程骨架（Maven 多模块 + Flyway 建表 + Vite 前端 + MUI/Tailwind 共存验证）
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

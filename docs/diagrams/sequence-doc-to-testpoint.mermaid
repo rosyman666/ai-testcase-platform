@@ -1,0 +1,81 @@
+%% 流程一：文档上传 → 解析 → 测试点抽取
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant FE as React 前端
+    participant DC as DocController
+    participant DS as DocService
+    participant PR as ParserRegistry
+    participant OP as OpenApiParser
+    participant TS as TestPointService
+    participant EX as TestPointExtractService
+    participant GS as GenTaskService
+    participant SCH as GenTaskDispatcher
+    participant WK as GenTaskWorker
+    participant RT as LlmProviderRouter
+    participant MP as MockLlmProvider
+    participant SP as StructuredOutputParser
+    participant DB as MySQL
+
+    U->>FE: 选择文件（.md/.txt/.docx/OpenAPI.json）
+    FE->>DC: POST /api/docs (multipart)
+    DC->>DS: upload(file)
+    DS->>DB: select doc_source where file_hash=?
+    alt 命中同内容文档
+        DB-->>DS: 已存在且 parse_status=PARSED
+        DS-->>DC: 复用已有 doc（不再解析、不再花钱）
+    else 新文档
+        DS->>DS: 校验扩展名白名单 + 大小上限(20MB)
+        DS->>DB: insert doc_source(parse_status=PENDING)
+        DS->>PR: parse(docType, bytes)
+        PR->>OP: supports=OPENAPI_JSON → parse
+        OP->>OP: 展开 paths → operations，$ref 浅解析(≤3层)
+        OP-->>PR: List of ApiOperation
+        PR-->>DS: ParseResult(sections, operations)
+        DS->>DB: 批量 insert doc_section / api_operation
+        DS->>DB: update doc_source(parse_status=PARSED, counts)
+        DS-->>DC: docId + 统计
+    end
+    DC-->>FE: code=0, data={docId, operationCount}
+
+    U->>FE: 点击"抽取测试点"
+    FE->>DC: POST /api/testpoints/extract {docId, provider}
+    DC->>TS: resolveScope(docId, operationIds?)
+    TS->>DB: select * from api_operation where doc_id=?
+    TS-->>DC: scope = N 个 operation（切分单位）
+    DC->>GS: createTask(scene=TESTPOINT_EXTRACT, scope)
+    GS->>DB: insert gen_task(PENDING, total_items=N)
+    GS->>DB: insert gen_task_item x N (PENDING, next_run_at=now)
+    GS-->>DC: taskId
+    DC-->>FE: code=0, data={taskId}
+    FE->>FE: 打开 /tasks/{taskId} 页并订阅 SSE
+
+    loop Scheduled fixedDelay=2s
+        SCH->>DB: select id ... for update skip locked limit 20
+        SCH->>WK: submit(itemId) 到线程池
+    end
+
+    WK->>DB: update item set status=RUNNING, attempts+1, worker_id
+    WK->>RT: route(provider=mock)
+    RT-->>WK: MockLlmProvider
+    WK->>EX: extract(operation)
+    EX->>DB: select prompt_template where code=testpoint_extract and is_active=1
+    EX->>EX: PromptRenderer.render(template, {operationJson, categories})
+    EX->>MP: chat(LlmRequest{responseFormat=JSON, schema=testpoint.schema})
+    MP-->>EX: LlmResponse{content=JSON数组, usage}
+    EX->>SP: parse(content, schema)
+    alt 解析/校验失败
+        SP-->>EX: throw JsonSchemaViolation
+        EX->>MP: chat(case_repair 模板 + 原输出 + 错误信息) 最多 3 次
+        MP-->>EX: 修复后的 JSON
+        EX->>SP: parse again
+    end
+    SP-->>EX: List of TestPointExtractDTO
+    EX->>TS: saveIdempotent(docId, dtos) 按 content_hash 去重
+    TS->>DB: insert test_point（已存在的置 SUPERSEDED 或跳过）
+    EX->>DB: insert llm_call_log(tokens, cost, latency, attempt_no)
+    WK->>DB: update item(SUCCESS, case_count=K, tokens, cost, latency)
+    WK->>DB: update gen_task done_items+1, progress=done/total*100
+    WK->>FE: SSE event progress / event item
+    WK->>FE: 全部完成后 SSE event done
+    FE-->>U: 测试点列表可编辑、启停

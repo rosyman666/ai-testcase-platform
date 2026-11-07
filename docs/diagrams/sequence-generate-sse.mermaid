@@ -1,0 +1,97 @@
+%% 流程二：用例生成（异步任务 + SSE 进度 + 重试与多级降级）
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant FE as React 前端
+    participant TC as GenTaskController
+    participant GS as GenTaskService
+    participant SCH as GenTaskDispatcher
+    participant WK as GenTaskWorker
+    participant OR as CaseGenerateOrchestrator
+    participant RT as LlmProviderRouter
+    participant OA as OpenAiCompatibleProvider
+    participant SP as StructuredOutputParser
+    participant DP as DegradePolicy
+    participant CS as CaseService
+    participant PUB as ProgressPublisher
+    participant DB as MySQL
+
+    U->>FE: 选文档 + 模板 + 模型，点"生成"
+    FE->>TC: POST /api/tasks
+    TC->>GS: create(docId, templateCode, provider, model)
+    GS->>DB: 校验 doc.parse_status=PARSED，否则 42003
+    GS->>DB: select test_point where doc_id=? and status=ACTIVE
+    GS->>DB: insert gen_task(status=PENDING, total_items=N, deadline_at=now+30min)
+    GS->>DB: insert gen_task_item x N
+    GS-->>TC: taskId
+    TC-->>FE: code=0, data={taskId}
+    FE->>FE: router.push(/tasks/{id}) → useTaskStream(taskId)
+
+    FE->>TC: GET /api/tasks/{id}/stream?token=xxx
+    TC->>TC: TokenService.verify(token)
+    TC->>PUB: register(taskId, emitter)
+    PUB->>DB: 重建快照（count by status）
+    PUB-->>FE: event snapshot {status:PENDING,progress:0}
+    PUB-->>FE: event heartbeat（每 20s）
+
+    loop 调度循环 每 2s
+        SCH->>DB: select PENDING 且 next_run_at<=now FOR UPDATE SKIP LOCKED
+        SCH->>WK: executor.submit(run(itemId))
+    end
+
+    WK->>DB: update item RUNNING
+    WK->>OR: generate(taskItem, testPoint, operation)
+    OR->>DB: select prompt_template(code=case_generate, is_active=1)
+    OR->>OR: render(api_spec, test_point, categories, few_shot)
+    OR->>RT: chat(request, timeoutSec=60)
+    RT->>OA: POST /v1/chat/completions (response_format=json_schema)
+    alt 上游 5xx / 429 / 超时
+        OA-->>RT: LlmException(retryable=true)
+        RT->>OA: 指数退避重试 500ms→1s→2s（+jitter）
+        RT-->>OR: 仍失败 → LlmException(E_LLM_UPSTREAM)
+    else 正常返回
+        OA-->>RT: LlmResponse{content, usage, latencyMs}
+        RT-->>OR: LlmResponse
+    end
+    OR->>DB: insert llm_call_log(attempt_no, tokens, cost_micro, status)
+
+    OR->>SP: parse(content, testcase.schema.json)
+    alt 校验通过
+        SP-->>OR: List of CaseDTO
+    else JSON 坏 或 schema 不合规
+        SP-->>OR: Failure(reason)
+        OR->>DP: decide(attemptNo, failure)
+        DP-->>OR: RETRY_WITH_REPAIR
+        OR->>OA: chat(case_repair 模板 + 原输出 + 校验错误)，temperature 递减
+        OR->>SP: parse again（最多 3 轮）
+        alt 3 轮仍失败
+            DP-->>OR: DEGRADE_LOOSE
+            OR->>OR: 宽松解析：正则抠 title/expected，缺字段补默认值
+            OR->>DB: insert test_case(status=DRAFT, confidence=0.5)
+            OR->>DB: update item(SUCCESS, 标记 degraded=true)
+        end
+    end
+
+    OR->>CS: saveCases(taskItemId, dtos) 事务内
+    CS->>DB: insert test_case x K (status=DRAFT, prompt_version, model, content_hash)
+    OR-->>WK: ItemResult{K, tokens, cost, latency}
+    WK->>DB: update item SUCCESS + 汇总
+    WK->>PUB: publishProgress(taskId)
+    PUB->>DB: update gen_task done_items+1, success_items+1, progress
+    PUB-->>FE: event progress {done:7, total:20, progress:35}
+    PUB-->>FE: event item {itemId, status:SUCCESS, caseCount:4}
+
+    Note over WK,DB: 全部 item 达终态后
+    WK->>DB: TaskStateMachine 汇总 → SUCCESS / PARTIAL / FAILED
+    WK->>PUB: publishDone(taskId)
+    PUB-->>FE: event done {summary:{success:18,failed:2,totalCases:71,costMicro:123456}}
+    PUB->>PUB: emitter.complete() 并从注册表移除
+
+    U->>FE: 打开评审看板
+    FE->>TC: GET /api/cases?taskId=xx&status=DRAFT
+    TC-->>FE: 分页用例列表
+    U->>FE: 驳回 + 选原因"预期结果不明确"
+    FE->>TC: POST /api/cases/{id}/review {action:REJECT, rejectReasonCode:EXPECT_UNCLEAR}
+    TC->>DB: insert case_review + update test_case.status=REJECTED
+    TC-->>FE: {status:REJECTED}
+    Note over DB: 这条 review 记录就是评估指标的标注数据源

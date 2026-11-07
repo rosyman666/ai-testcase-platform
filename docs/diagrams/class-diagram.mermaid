@@ -1,0 +1,435 @@
+classDiagram
+    direction LR
+
+    %% ===== ai 层：provider 抽象（唯一会失败的依赖，必须隔离） =====
+    class LlmProvider {
+        <<interface>>
+        +String name()
+        +boolean supports(String model)
+        +LlmResponse chat(LlmRequest request)
+        +boolean healthy()
+    }
+
+    class MockLlmProvider {
+        -String fixtureDir
+        +String name()
+        +LlmResponse chat(LlmRequest request)
+    }
+
+    class OpenAiCompatibleProvider {
+        -String baseUrl
+        -String apiKey
+        -String model
+        -OkHttpClient http
+        +String name()
+        +LlmResponse chat(LlmRequest request)
+        -LlmResponse doPost(LlmRequest request)
+    }
+
+    class LlmProviderRouter {
+        -Map~String,LlmProvider~ providers
+        -List~String~ fallbackChain
+        +LlmProvider route(String providerName, String model)
+        +LlmResponse chatWithFallback(LlmRequest request)
+    }
+
+    class LlmRequest {
+        +String scene
+        +String systemPrompt
+        +List~LlmMessage~ messages
+        +double temperature
+        +int maxTokens
+        +String jsonSchema
+        +int timeoutMs
+        +String traceId
+    }
+
+    class LlmResponse {
+        +String content
+        +LlmUsage usage
+        +String finishReason
+        +int latencyMs
+        +String rawBody
+    }
+
+    class LlmUsage {
+        +int promptTokens
+        +int completionTokens
+        +int totalTokens()
+    }
+
+    class LlmException {
+        +ErrorCode errorCode
+        +boolean retryable
+    }
+
+    %% ===== ai 层：结构化输出治理 =====
+    class StructuredOutputParser {
+        +T parse(String raw, String schemaPath, Class~T~ targetType)
+        -String stripMarkdownFence(String raw)
+        -String extractBalancedJson(String raw)
+    }
+
+    class JsonRepairer {
+        +String repair(String brokenJson)
+    }
+
+    class JsonSchemaValidator {
+        -Map~String,JsonSchema~ cache
+        +void validate(JsonNode node, String schemaPath)
+    }
+
+    class PromptTemplateService {
+        +PromptTemplate activeOf(String code)
+        +PromptTemplate saveNewVersion(PromptTemplate tpl)
+        +void activate(Long templateId)
+    }
+
+    class PromptRenderer {
+        +String render(String template, Map~String,String~ vars)
+    }
+
+    class PromptTemplateLoader {
+        +void run()
+        -void seedFromClasspath()
+    }
+
+    %% ===== 文档模块 =====
+    class DocService {
+        +DocSource upload(MultipartFile file, DocType typeHint)
+        +ParseResult reparse(Long docId)
+        -ParseResult parse(DocType type, byte[] bytes)
+    }
+
+    class ParserRegistry {
+        -List~DocumentParser~ parsers
+        +DocumentParser of(DocType type)
+    }
+
+    class DocumentParser {
+        <<interface>>
+        +boolean supports(DocType type)
+        +ParseResult parse(byte[] bytes)
+    }
+
+    class OpenApiParser {
+        +ParseResult parse(byte[] bytes)
+        -void expandRefs(JsonNode schema, int depth)
+    }
+
+    class DocxParser {
+        +ParseResult parse(byte[] bytes)
+    }
+
+    class MarkdownParser {
+        +ParseResult parse(byte[] bytes)
+    }
+
+    class TxtParser {
+        +ParseResult parse(byte[] bytes)
+    }
+
+    %% ===== 测试点模块 =====
+    class TestPointExtractService {
+        -LlmProviderRouter router
+        -PromptTemplateService templates
+        -StructuredOutputParser parser
+        +List~TestPoint~ extract(ApiOperation op, String provider, String model)
+        -List~TestPointExtractDTO~ callWithRepair(GenerationContext ctx)
+    }
+
+    class TestPointService {
+        +int saveIdempotent(Long docId, List~TestPointExtractDTO~ dtos, String promptVersion)
+        +void updateStatus(Long id, TestPointStatus status)
+        +List~TestPoint~ listActive(Long docId)
+    }
+
+    class TestPoint {
+        +Long id
+        +Long docId
+        +Long operationId
+        +String title
+        +TestPointCategory category
+        +String riskLevel
+        +String sourceRef
+        +TestPointStatus status
+        +String promptVersion
+        +String contentHash
+    }
+
+    %% ===== 任务引擎 =====
+    class GenTaskService {
+        +GenTask create(GenTaskCreateReq req)
+        +void retryFailed(Long taskId, List~Long~ itemIds)
+        +void cancel(Long taskId)
+        +GenTaskVO detail(Long taskId)
+        -List~GenTaskItem~ splitItems(GenTask task, List~TestPoint~ points)
+    }
+
+    class GenTaskDispatcher {
+        -GenTaskItemMapper itemMapper
+        -ThreadPoolTaskExecutor executor
+        +void poll()
+        -List~Long~ claimBatch(int limit)
+    }
+
+    class GenTaskWorker {
+        +void run(Long itemId)
+        -void onTimeout(Long itemId)
+        -void onFailure(Long itemId, LlmException e)
+    }
+
+    class TaskStateMachine {
+        +boolean canTransit(GenTaskStatus from, GenTaskStatus to)
+        +GenTaskStatus resolveFinal(int total, int success)
+    }
+
+    class ProgressPublisher {
+        -SseEmitterRegistry registry
+        +void publishSnapshot(Long taskId)
+        +void publishProgress(Long taskId)
+        +void publishItem(Long taskId, GenTaskItem item)
+        +void publishDone(Long taskId)
+    }
+
+    class SseEmitterRegistry {
+        -Map emitterMap
+        +SseEmitter register(Long taskId)
+        +void send(Long taskId, String event, Object payload)
+        +void complete(Long taskId)
+    }
+
+    class GenTask {
+        +Long id
+        +String taskNo
+        +GenTaskScene scene
+        +GenTaskStatus status
+        +int totalItems
+        +int doneItems
+        +int successItems
+        +int failedItems
+        +int progress
+        +LocalDateTime deadlineAt
+    }
+
+    class GenTaskItem {
+        +Long id
+        +Long taskId
+        +Long testPointId
+        +GenTaskItemStatus status
+        +int attempts
+        +int caseCount
+        +String errorCode
+        +int promptTokens
+        +long costMicro
+        +LocalDateTime nextRunAt
+    }
+
+    %% ===== 生成编排 =====
+    class CaseGenerateOrchestrator {
+        -LlmProviderRouter router
+        -PromptTemplateService templates
+        -PromptRenderer renderer
+        -StructuredOutputParser parser
+        -RetryPolicy retryPolicy
+        -DegradePolicy degradePolicy
+        +ItemResult generate(GenTaskItem item, TestPoint point)
+        -List~CaseDTO~ callAndParse(GenerationContext ctx)
+        -List~CaseDTO~ degradeLoose(String raw)
+    }
+
+    class RetryPolicy {
+        +int maxAttempts()
+        +long backoffMillis(int attempt)
+        +double temperatureFor(int attempt)
+    }
+
+    class DegradePolicy {
+        +DegradeAction decide(int attempt, ParseFailure failure)
+    }
+
+    class GenerationContext {
+        +GenTask task
+        +GenTaskItem item
+        +TestPoint point
+        +ApiOperation operation
+        +PromptTemplate template
+        +int attemptNo
+    }
+
+    %% ===== 用例与评审 =====
+    class CaseService {
+        +PageResult~TestCaseVO~ list(CaseQuery query)
+        +TestCaseVO update(Long id, CaseUpdateReq req)
+        +int saveGenerated(Long taskItemId, List~CaseDTO~ dtos, GenerationContext ctx)
+    }
+
+    class CaseReviewService {
+        +TestCaseVO review(Long caseId, ReviewReq req)
+        +BatchResult batchReview(BatchReviewReq req)
+        -void record(CaseReview review)
+    }
+
+    class TestCase {
+        +Long id
+        +Long taskId
+        +Long taskItemId
+        +Long testPointId
+        +int seqNo
+        +String title
+        +String precondition
+        +String steps
+        +String expected
+        +String priority
+        +CaseStatus status
+        +double confidence
+        +String promptVersion
+        +String model
+    }
+
+    class CaseReview {
+        +Long id
+        +Long caseId
+        +ReviewAction action
+        +String rejectReasonCode
+        +String reasonText
+        +String oldContent
+        +String newContent
+        +Long reviewerId
+        +LocalDateTime createdAt
+    }
+
+    %% ===== 导出 =====
+    class ExcelExportService {
+        +void write(ExportContext ctx, OutputStream out)
+    }
+
+    class JUnitExportService {
+        +Map~String,String~ generate(ExportContext ctx)
+        -TypeSpec buildClass(TestCase c)
+        -MethodSpec buildMethod(TestCase c)
+    }
+
+    class CaseSnapshotBuilder {
+        +ExportContext build(Long taskId, List~CaseStatus~ statuses)
+    }
+
+    %% ===== 执行结果 =====
+    class ExecutionImportService {
+        +ImportResult importFile(MultipartFile file, String name)
+        -int mapToCases(Long runId)
+    }
+
+    class FailureTriageService {
+        +Map~String,Integer~ triage(Long runId)
+        -String ruleBased(ExecutionResult r)
+    }
+
+    class ResultParser {
+        <<interface>>
+        +boolean supports(String fileName, String head)
+        +List~RawResult~ parse(InputStream in)
+    }
+
+    class JUnitXmlParser {
+        +List~RawResult~ parse(InputStream in)
+    }
+
+    class CsvResultParser {
+        +List~RawResult~ parse(InputStream in)
+    }
+
+    %% ===== 指标 =====
+    class MetricsService {
+        +OverviewVO overview(LocalDate from, LocalDate to, Long docId)
+        +List~AcceptancePointVO~ acceptance(LocalDate from, LocalDate to, String groupBy)
+        +List~ChartItemVO~ rejectReasons(LocalDate from, LocalDate to)
+        +QualityVO quality(LocalDate from, LocalDate to)
+    }
+
+    class CostService {
+        +List~CostPointVO~ cost(LocalDate from, LocalDate to, String groupBy)
+        +long costMicroOfTask(Long taskId)
+    }
+
+    class ModelPriceService {
+        -Map~String,ModelPrice~ cache
+        +long calcCostMicro(String model, int promptTokens, int completionTokens)
+    }
+
+    class LlmCallLog {
+        +Long id
+        +Long taskId
+        +Long taskItemId
+        +String scene
+        +String provider
+        +String model
+        +int promptTokens
+        +int completionTokens
+        +long costMicro
+        +int latencyMs
+        +int attemptNo
+        +String status
+    }
+
+    %% ===== 关系 =====
+    LlmProvider <|.. MockLlmProvider
+    LlmProvider <|.. OpenAiCompatibleProvider
+    LlmProviderRouter o-- LlmProvider : routes to
+    LlmProvider ..> LlmRequest
+    LlmProvider ..> LlmResponse
+    LlmResponse *-- LlmUsage
+    LlmProvider ..> LlmException
+
+    StructuredOutputParser *-- JsonRepairer
+    StructuredOutputParser *-- JsonSchemaValidator
+    PromptTemplateService ..> PromptRenderer
+    PromptTemplateLoader ..> PromptTemplateService : seeds
+
+    DocumentParser <|.. OpenApiParser
+    DocumentParser <|.. DocxParser
+    DocumentParser <|.. MarkdownParser
+    DocumentParser <|.. TxtParser
+    ParserRegistry o-- DocumentParser
+    DocService --> ParserRegistry
+
+    TestPointExtractService --> LlmProviderRouter
+    TestPointExtractService --> PromptTemplateService
+    TestPointExtractService --> StructuredOutputParser
+    TestPointExtractService --> TestPointService
+    TestPointService ..> TestPoint
+
+    GenTaskService ..> GenTask
+    GenTaskService --> GenTaskItem
+    GenTaskDispatcher --> GenTaskItem
+    GenTaskDispatcher --> GenTaskWorker : submits
+    GenTaskWorker --> CaseGenerateOrchestrator
+    GenTaskWorker --> TaskStateMachine
+    GenTaskWorker --> ProgressPublisher
+    ProgressPublisher --> SseEmitterRegistry
+    GenTask "1" *-- "0..*" GenTaskItem : splits
+
+    CaseGenerateOrchestrator --> RetryPolicy
+    CaseGenerateOrchestrator --> DegradePolicy
+    CaseGenerateOrchestrator ..> GenerationContext
+    CaseGenerateOrchestrator --> LlmProviderRouter
+    CaseGenerateOrchestrator --> PromptRenderer
+    CaseGenerateOrchestrator --> StructuredOutputParser
+    CaseGenerateOrchestrator --> CaseService
+
+    CaseService ..> TestCase
+    CaseReviewService ..> CaseReview
+    CaseReviewService --> CaseService
+
+    CaseSnapshotBuilder --> ExcelExportService
+    CaseSnapshotBuilder --> JUnitExportService
+
+    ExecutionImportService --> ResultParser
+    ResultParser <|.. JUnitXmlParser
+    ResultParser <|.. CsvResultParser
+    ExecutionImportService --> FailureTriageService
+    FailureTriageService ..> LlmProviderRouter : optional
+
+    MetricsService --> CostService
+    CostService --> ModelPriceService
+    CostService ..> LlmCallLog

@@ -1198,6 +1198,8 @@ graph LR
 ```
 
 - 成功：`code = 0`，`message = "ok"`，`data` 可为对象/数组/null。
+- **`data` 字段必须始终出现在 JSON 里（即使为 `null`）**：`ApiResponse` 用 `@JsonInclude(ALWAYS)` 锁定，前端 axios 拦截器靠"`data` 键是否存在"判断响应体 schema 是否一致。**禁止**改成 `NON_NULL`——那会让 `{"code":0,"message":"ok","traceId":"..."}` 缺 `data`，前端解包拿到 `undefined` 而不是 `null`，`data.length` 之类判空会抛 `TypeError`。
+- **`traceId` 依赖 MDC 键名常量 `TraceFilter.MDC_TRACE_ID = "traceId"`**：`ApiResponse.currentTraceId()` 从 MDC 取这个键。改名不会编译报错，只会让所有响应的 `traceId` **静默变成空串**——排查链路直接断掉。T02 扩展 `TraceFilter` 时不要动这个常量名与 finally 清理逻辑。
 - 失败：`code != 0`，`message` 为**面向用户的中文**（可直接 toast），技术细节只进日志。
 - HTTP 状态码策略：业务错误统一 `200` + `code!=0`（前端 axios 拦截器按 `code` 判断）；**仅**鉴权失败用 `401`、未找到用 `404`、限流用 `429` 以兼容网关与浏览器行为。
 
@@ -1419,7 +1421,7 @@ spring:
 | 是否引入了 PRD 之外的功能 | ✅ 未引入；仅新增 `system/dict` 只读接口（服务前端枚举，属必要基础设施） |
 | 是否引入 Redis/MQ/外部中间件 | ✅ 无。队列=MySQL 表，推送=SSE，缓存=进程内 |
 | 指标口径是否可被 SQL 直接验证 | ✅ §8.3 全部为 `count`/`sum` 表达式，无模糊表述 |
-| 实施偏差是否留档 | ✅ §11 逐项记录 **10 条**偏差（D-01~D-10：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整） |
+| 实施偏差是否留档 | ✅ §11 逐项记录 **11 条**偏差（D-01~D-11：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、1 个文档表格与 yml 漂移） |
 
 ---
 
@@ -1443,6 +1445,18 @@ spring:
 | **D-08** | `V1__schema.sql` / `V2__dict_and_config.sql` 的布尔型列 | 草稿口径写作 `TINYINT(1)` | 全库 **8 个**布尔列统一写作 `TINYINT`，`TINYINT(1)` 出现 **0 次**：`enabled` ×4（`app_user` / `model_price` / `reject_reason` / `failure_category`）、`deleted` ×1、`is_active` ×1、`degraded` ×2 | MySQL 8.0.17 起**显示宽度对整数类型已废弃**，8.0.19+ 写 `TINYINT(1)` 会告警并被改写；`(1)` 与 `(4)` 存储完全相同 | 无功能影响。§3.1 ER 用 `tinyint` 表述，与实际 DDL 一致。**唯一注意点**：MySQL Connector/J 仍会把 `TINYINT(1)` 优先映射为 `Boolean`，而 `TINYINT` 映射为 `Byte`/`Integer`——本项目实体统一用 `Integer`（0/1）而非 `Boolean`，避免"有人好心把 DDL 改成 `TINYINT(1)`、导致 DAO 反序列化炸掉" |
 | **D-09** | `backend/src/main/resources/application-prod.yml`<br/>同步 §2.2 | §2.2 目录树列出该文件（"真实 provider，密钥走环境变量"） | **T01 未创建，文件不存在**。由 **T14** 承接交付；§2.2 已标注「T14 交付：生产 profile，密钥全部走环境变量，禁止任何默认值兜底」 | T01 阶段创建它没有意义：T02 才引入鉴权配置、T04 才引入 provider 配置，此时写 prod profile 只能是空壳；而空壳文件最危险——它会让人误以为"生产配置已就绪" | 不影响本机与 dev 启动（`spring.profiles.active` 默认 `dev`）。**风险点**：若 T14 漏交付，生产环境会静默使用 dev 的默认值。缓解：T14 验收必须包含"`--spring.profiles.active=prod` 且不提供 `DB_PASSWORD` 时启动失败" |
 | **D-10** | `LlmCallLog` 实体归属<br/>同步 §2.2、§6 的 T04 / T07 / T11 | 实体 `metrics/domain/LlmCallLog.java` + `metrics/mapper/LlmCallLogMapper.java` 由 **T11** 创建；记账写在 T07 验收里 | 实体与 mapper 移至 **`aicore/log/`**、由 **T04** 交付；新增 `aicore/provider/LoggingLlmProvider`（**装饰器**包住真实 provider，成功与异常**都**写一条台账）。T07 验收⑤ 改为"验证装饰器被真实触发"，T11 只读聚合 | **职责倒挂 + 成环**。① 倒挂：台账是 AI 调用的副产物，`aicore` 若不负责记账就无法独立观测，成本也要等到 T11 才能验证；② 成环：T07 验收要求写台账，但 mapper 在 T11，而 T11 依赖 T07 → 给 T07 加 `→T11` 即环。装饰器还顺带统一了 mock 与真实 provider 的记账口径，避免两处各写一遍 | T11 的 `CostService` 改为读 `aicore/log/LlmCallLogMapper`（跨包只读，不反向依赖）；`llm_call_log` 表结构不变。**注意**：`aicore` 因此多了对 `llm_call_log` 表的依赖，但这仍是"基础设施"而非"业务模块"，不违反 §1.3 的单向依赖约束 |
+| **D-11** | §8.8「键名↔占位符对照表」<br/>（文档自身写错，代码为准） | 表中写 `AI_MODEL` → `${AI_MODEL:}`（缺省空串）；且**整表漏了 `SERVER_PORT` 这一行** | 按实际 `application.yml` 更正：`AI_MODEL` → `${AI_MODEL:mock-model}`；补 `SERVER_PORT` → `${SERVER_PORT:8080}` 一行，并附端口劫持的坑 | ① `V2__dict_and_config.sql` 的 `model_price` 种子里 mock 的 `model` 就是 **`mock-model`**（单价 0/0）。缺省空串会让 `llm_call_log.model = ''` 与 `model_price.model` 关联不上，成本恒为 0 且**分不清是"算对了"还是"没算"**；② 漏 `SERVER_PORT` 是 §11.1 D-07 那个端口劫持的直接诱因，最该写进共享知识的一条反而没写 | 仅文档。§8.8 对照表现在 **10 行覆盖 15 个真实占位符键**（`AI_TEMPERATURE_*` 三键合并为一行），与 `application.yml` 逐个核对一致（自查命令见本表下方 §11.1 备注） |
+
+**D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 15 个键一个不漏）：
+
+```bash
+# 必须先滤掉注释行，否则会多出一个 ENV——
+# 那是 application.yml 第 3 行注释里讲解 ${ENV:默认值} 写法时出现的字面量，不是真占位符
+grep -v '^\s*#' backend/src/main/resources/application.yml \
+  | grep -oE '\$\{[A-Z_]+' | sed 's/\${//' | sort -u
+```
+
+当前期望输出 15 个键：`AI_API_KEY AI_BASE_URL AI_MODEL AI_PROVIDER AI_TEMPERATURE_GENERATE AI_TEMPERATURE_REPAIR AI_TEMPERATURE_TESTPOINT AI_TIMEOUT_SECONDS DB_HOST DB_NAME DB_PASSWORD DB_PORT DB_USERNAME SERVER_PORT SPRING_PROFILES_ACTIVE`
 
 ### 11.2 一条与指令不符的说明（必须留痕）
 

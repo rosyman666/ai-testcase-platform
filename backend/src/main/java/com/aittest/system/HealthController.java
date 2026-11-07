@@ -63,7 +63,9 @@ public class HealthController {
         data.put("dbOk", dbOk);
         data.put("provider", provider);
         data.put("model", model);
-        data.put("time", Instant.now().toString());
+        // 传 Instant 对象而不是 Instant.now().toString()：由 JacksonConfig 统一格式化为
+        // 固定 3 位毫秒 + Z，与其它时间字段（如 LocalDateTime）保持同一种写法
+        data.put("time", Instant.now());
         return ApiResponse.ok(data);
     }
 

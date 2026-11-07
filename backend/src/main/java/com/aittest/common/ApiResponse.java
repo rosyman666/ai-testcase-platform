@@ -1,7 +1,6 @@
 package com.aittest.common;
 
 import com.aittest.logging.TraceFilter;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Getter;
 import lombok.ToString;
@@ -128,19 +127,6 @@ public class ApiResponse<T> {
     }
 
     /**
-     * 是否为成功响应。
-     *
-     * <p><b>必须加 {@code @JsonIgnore}</b>：Jackson 会把它当成 {@code success} 属性序列化出去，
-     * 从而破坏 §8.1 规定的四字段结构（多一个字段就可能让前端"严格校验 schema"的逻辑失效）。</p>
-     *
-     * @return {@code code == 0} 返回 true
-     */
-    @JsonIgnore
-    public boolean isSuccess() {
-        return this.code == CODE_OK;
-    }
-
-    /**
      * 取当前请求的 traceId；非 Web 线程（如定时任务）下退化为空串，保证字段存在。
      *
      * @return traceId，永不为 null
@@ -149,4 +135,11 @@ public class ApiResponse<T> {
         String traceId = MDC.get(TraceFilter.MDC_TRACE_ID);
         return traceId == null ? "" : traceId;
     }
+
+    // ---------------------------------------------------------------------
+    // 注意：本类**刻意不提供任何 isXxx() / getXxx() 形式的非字段访问器**。
+    // 曾经有过 `public boolean isSuccess()`（用来判断 code==0），结果 Jackson 把它当成
+    // bean 属性序列化，所有响应凭空多出字段 "success":true —— 破坏 §8.1 的四字段契约，
+    // 且不报错、只在肉眼比对 JSON 时才发现。判断成功请直接用 `getCode() == CODE_OK`。
+    // ---------------------------------------------------------------------
 }

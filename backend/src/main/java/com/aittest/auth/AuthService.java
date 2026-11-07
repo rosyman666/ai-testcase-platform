@@ -71,7 +71,7 @@ public class AuthService {
         log.info("登录成功 userId={} username={}", user.getId(), user.getUsername());
         return new LoginResponse(
                 issued.token(),
-                Instant.ofEpochSecond(issued.expiresAt()).toString(),
+                Instant.ofEpochSecond(issued.expiresAt()),
                 user.getDisplayName(),
                 user.getId(),
                 user.getUsername());

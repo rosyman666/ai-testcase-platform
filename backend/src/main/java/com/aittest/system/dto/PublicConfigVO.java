@@ -1,6 +1,7 @@
 package com.aittest.system.dto;
 
 import com.aittest.common.CodeLabel;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -47,9 +48,9 @@ public record PublicConfigVO(
      * @param version    版本号
      * @param aiProvider 模型供应商
      * @param aiModel    模型名
-     * @param serverTime 服务端当前时间（ISO-8601 UTC，前端可据此校时）
+     * @param serverTime 服务端当前时间（由 JacksonConfig 统一格式化为 ISO-8601 UTC，前端可据此校时）
      */
-    public record AppInfo(String name, String version, String aiProvider, String aiModel, String serverTime) {
+    public record AppInfo(String name, String version, String aiProvider, String aiModel, Instant serverTime) {
     }
 
     /**

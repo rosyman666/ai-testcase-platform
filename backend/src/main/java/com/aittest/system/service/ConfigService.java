@@ -65,7 +65,7 @@ public class ConfigService {
                 appVersion,
                 aiProperties.getProvider(),
                 aiProperties.getModel(),
-                Instant.now().toString());
+                Instant.now());
         PublicConfigVO.Limits limits = new PublicConfigVO.Limits(
                 com.aittest.common.PageQuery.MAX_SIZE,
                 UPLOAD_MAX_MB,

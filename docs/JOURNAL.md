@@ -232,6 +232,51 @@
 
 ---
 
+## 2026-11-07 · 阶段 5 · T03 文档接入与解析
+
+### 做了什么
+
+1. **四种格式的解析器**：`doc/service/parser/` 下 `DocumentParser`（接口 + 统一产物 record）、`ParserRegistry`（按 `DocType` 分发）、`MarkdownParser`（按标题层级切章节）、`TxtParser`（按空行/长度切块，首行前 60 字作标题）、`DocxParser`（POI `XWPFDocument`，遍历 `getBodyElements()` 同时抽段落与表格）、`OpenApiParser`（按 operation 切分）。
+2. **`$ref` 展开**：深度上限 3 层，并用 `Set<String>` 记录已访问指针——自引用/三元环在深度 3 以内也能无限展开，只靠深度计数挡不住。
+3. **`DocService`（737 行）**：查重秒回 / 软删恢复 / 失败重解析 / PENDING 不动，四态各有明确动作；`doc_no` 走 `IdGen.generateWithRetry`（D-17 的成果）。
+4. **`config/TimezoneGuard`**：启动时在应用自己的 `DataSource` 上查 `@@session.time_zone`，非 `+00:00` 打 `[TZ-GUARD]` WARN，不抛异常、不阻断开机。
+5. **VO 拆分**：`DocSourceVO` / `DocDetailVO` / `DocSectionVO` / `ApiOperationVO`，列表不带 `storage_path`/`deleted`/`created_by`/schema 三兄弟，converter 逐字段赋值。
+6. **前端**：`types/doc.ts`、`api/doc.ts`、`DocList`/`DocUploadDialog`/`DocDetail`，路由表**只新增**两条懒加载路由。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| `upload` 解析失败返 `code=0` + `parseStatus=FAILED`；`reparse` 才返 `42001` | 判据是 HTTP 语义：`upload` 的请求目的（接收并落盘建行）已达成，解析失败是**资源的状态**不是请求失败 | 统一返 `42001`（会让"文件存下来了但解析失败"和"根本没存下来"无法区分） |
+| 扩展名判据只来自 `DocType.ofExtension` | 单一真源；另写一份 if-else 就必然有一天两边不一致 | 在 `DocService` 里按后缀判断（重复真源） |
+| 落盘路径存**相对** `storage.dir` | 绝对路径把"根在当前机器的取值"烧进每一行 → 换机器全部失效，README 的"三步跑通"不成立 | 存绝对路径（本机能跑，换机器崩） |
+| 查重命中 `PARSED` 时先判文件可读、不可读则重新落盘 | "行在、字节丢"原本永久不可自愈：重传只得 `reused:true`，只有主动重解析才发现丢了 | 直接秒回（把"可回溯"变成一句空话） |
+| `TimezoneGuard` 用 `ApplicationRunner` | `@PostConstruct` 阶段 Flyway 未必迁移完，且抛异常会打挂上下文，与"只告警"冲突 | `@PostConstruct` / `@EventListener` |
+
+### 踩坑记录
+
+1. **落盘写进 `java.io.tmpdir`**：Javadoc 里老老实实写了"重启可能被清理"，但 `storage_path` 的存在理由恰恰是"重解析不必让用户重传"——把它写进会被系统清理的目录，等于让这句话变成假的，而且失败是**静默**的（库里有行、路径有值、文件已没）。已改为 `storage.dir` 持久目录（D-19）。
+2. **`${STORAGE_DIR:uploads}` 的 `:默认值` 不处理空串**：`.env` 写 `STORAGE_DIR=` 时 Spring 绑出空串，`Path.of("")` 就是工作目录本身 → 文件静默落到 `backend/docs/`。上传、解析、入库全部成功，**没有任何测试会红**。`setDir` 补 `isBlank()` 回落 + `trim()`（D-21）。
+3. **`InvalidPathException` 不是 `IOException`**：空白配置或脏 `storage_path` 抛它，会从 `catch (IOException)` 漏出去 → 英文的 `50000`。已统一归为"文件不可读"，返 `42001` + 中文（D-23）。
+4. **我自己的验证脚本连错两次**：① 用 SQL 字面量写 Windows 绝对路径，反斜杠被 MySQL 当转义符吃掉，造出 `D:codeProject...` 这种脏值，我一度以为是产品 bug；② 断言"软删会删文件"——实际按 §3.2 / D-02 **软删不删文件**（否则重传恢复就没字节可复用）。**两次都是断言错，不是代码错**；先怀疑断言这条纪律今天用了两次。
+5. **`V1__schema.sql` 的注释不能直接改**：Flyway 对已应用脚本逐字节 CRC32 校验，改一个注释字符 → `Migration checksum mismatch` → 应用起不来。注释漂移只能靠新迁移覆盖（`V4__fix_storage_path_comment.sql`，纯 `MODIFY COLUMN ... COMMENT`，走 INSTANT 不重建表）。
+6. **`UPDATE` 会触发 `ON UPDATE CURRENT_TIMESTAMP(3)`**：修 `storage_path` 时若不写 `updated_at = updated_at`，会把审计时间改成执行时刻——和 §3.2.1.2 手工写库那个坑是同一件事的自动化版本。
+
+### 验证
+
+两个独立脚本共 **40 条断言全绿**（21 + 19）：
+
+- `storage_path` 为相对路径且文件真实落盘；同文件重传 `reused=true` 且行数不变；删掉字节后重传**自愈**（路径更新 + 文件回来）；`reparse` 读回成功；历史绝对路径行双模式仍可读；脏路径返 `42001` 而非 `50000`；`.pdf` 返 `42002`；`created_at` 与 `UTC_TIMESTAMP(3)` 差 0s 且换 `+08` 会话重算不变
+- 软删恢复：`docId`/`docNo` 不变、`deleted` 回 0、章节不翻倍、行数不增；`force=true` 才物理删行并清理文件
+- `STORAGE_DIR=`（空）与 `STORAGE_DIR='   '`（空白）都回落到 `../uploads`，`InvalidPathException` 计数 0
+- docx 与 OpenAPI 冒烟通过（OpenAPI 3 个 operation 的 method/path/summary 均落库）
+
+### 下一步
+
+- T04：`aicore` 抽象 + `llm_call_log`，并接住 §8.1.1 定义的 `40004 E_FIELD_TOO_LONG` / `40902 E_DUPLICATE`（`GlobalExceptionHandler` 新增 `DataIntegrityViolationException` 分支）
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

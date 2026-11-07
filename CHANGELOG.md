@@ -19,9 +19,15 @@
 - README 补齐环境要求与四步快速开始（含 `java -jar` 的端口注意事项）
 - **T02 通用基础设施与鉴权闭环**：`ErrorCode`（12 个错误码）/ `BizException` / `GlobalExceptionHandler` 统一错误语义；`PageQuery` + `PageResult` 分页契约；11 个枚举收敛到 `common/enums`（`CodedEnum` 单一真源）；`auth` 模块（登录、Token、拦截器、`AuthContext`）与种子账号 `admin`；`AuditMetaObjectHandler` 自动填充审计字段；`config/AsyncConfig` 有界线程池与 `AiProperties` 模型配置
 - **前端登录闭环**：`api/http.ts` 统一请求出口（`code !== 0` 拦截、`Authorization` 注入、统一错误提示）、`api/system.ts`、登录态 `store`、`pages/Login.tsx`、路由表 `/login` `/` `*`
+- **T03 文档接入与解析**：四种格式上传解析（Markdown 按标题切章节 / TXT 按空行切块 / DOCX 抽段落与表格 / OpenAPI 按 operation 切分，`$ref` 深度 ≤3 且环引用不展开）；`doc` 模块 19 个后端文件（domain / mapper / parser / service / VO / controller）；`config/TimezoneGuard` 启动时区自检（只告警不阻断）；`doc_source` 查重秒回与软删恢复；前端 `pages/docs/{DocList,DocUploadDialog,DocDetail}` 与 `api/doc.ts`
 
 ### Fixed
 
+- **原始文件落到系统临时目录**（`D-19`）：`java.io.tmpdir` 会被 `systemd-tmpfiles` 之类清理，重启后 `storage_path` 指向不存在的文件，重解析永久失败。改为 `storage.dir`（默认 `./uploads`，可用 `STORAGE_DIR` 覆盖）下的持久目录，并把实际绝对路径在**每进程首次落盘**时打进日志
+- **`STORAGE_DIR` 为空时文件库静默搬家**（`D-21`）：`${STORAGE_DIR:uploads}` 的 `:默认值` 只处理"键不存在"，不处理"键存在但值为空"，`Path.of("")` 得到的就是工作目录本身。`StorageProperties.setDir` 补 `isBlank()` 回落 + `trim()`（空白串抛的 `InvalidPathException` 不属 `IOException`，会漏成英文 50000）
+- **`storage_path` 存绝对路径**（`D-22`）：把"根在当前机器上的取值"烧进每一行，"文件在哪"出现两个真源，换机器后全部失效。改为存相对 `storage.dir` 的路径（`docs/yyyyMMdd/<uuid>.md`），读取时拼回，并对早期绝对路径行双模式兼容（退役条件写在 §9）
+- **"行在、字节丢"永久不可自愈**（`D-23`）：查重命中 `PARSED` 直接秒回、不再落盘，重传同一文件只得 `reused:true` 而路径仍指向空文件。改为秒回前先判文件可读，不可读则用本次字节重新落盘并更新 `storage_path`
+- **脏 `storage_path` 冒 50000**（`D-23`）：`Path.of` 抛的 `InvalidPathException` 不是 `IOException`，会落到兜底处理器并带英文文案。统一归为"文件丢失"，返 `42001` + 中文提示
 - **`ApiResponse.isSuccess()` 污染响应体**：Jackson 按 bean getter 规则把 `isSuccess()` 序列化成 `"success": true`，使响应体从 4 字段变 5 字段，破坏接口契约。删除该方法，判成功一律用 `code == 0`
 - **`NoResourceFoundException` 被映射成 50000**：Spring 6.1 起 404 改抛 `NoResourceFoundException`（不再是 `NoHandlerFoundException`），全局处理器未覆盖，访问不存在路径返回"系统内部错误"。补映射到 `40401`
 - **`Instant` 序列化出 9 位纳秒**：`Instant.toString()` 的小数位随精度浮动，无法被前端 `dayjs` 稳定解析。改为固定 3 位毫秒 + `Z`

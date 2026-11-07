@@ -16,6 +16,9 @@ import { useAuthStore } from '@/store/authStore';
 // 懒加载：首屏只加载登录页，业务页按需拉取
 const LoginPage = lazy(() => import('@/pages/Login'));
 const HomePage = lazy(() => import('@/pages/Home'));
+// T03：文档模块（只新增，不改动已有路由）
+const DocListPage = lazy(() => import('@/pages/docs/DocList'));
+const DocDetailPage = lazy(() => import('@/pages/docs/DocDetail'));
 
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
@@ -69,6 +72,23 @@ export const router = createBrowserRouter([
         element: (
           <PageBoundary>
             <HomePage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T03 文档模块：列表与详情。只新增，`/login`、`/` 与 `*` 兜底保持原样。
+        path: '/docs',
+        element: (
+          <PageBoundary>
+            <DocListPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        path: '/docs/:id',
+        element: (
+          <PageBoundary>
+            <DocDetailPage />
           </PageBoundary>
         ),
       },

@@ -8,6 +8,7 @@ import com.aittest.common.PageQuery;
 import com.aittest.common.PageResult;
 import com.aittest.common.enums.DocType;
 import com.aittest.common.enums.ParseStatus;
+import com.aittest.config.StorageProperties;
 import com.aittest.doc.domain.ApiOperation;
 import com.aittest.doc.domain.DocSection;
 import com.aittest.doc.domain.DocSource;
@@ -83,13 +84,7 @@ public class DocService {
     /** {@code doc_source.parse_error} 列宽。 */
     private static final int PARSE_ERROR_MAX = 1000;
 
-    /** 详情内嵌章节/接口的上限（全量请走分页接口）。 */
-    private static final int DETAIL_EMBED_LIMIT = 200;
-
-    /** 落盘根目录（相对系统临时目录）。 */
-    private static final String STORAGE_ROOT = "ai-testcase";
-
-    /** 落盘子目录。 */
+    /** 落盘子目录（在 {@code storage.dir} 之下再分一层，便于日后与导出物分离）。 */
     private static final String STORAGE_DOCS = "docs";
 
     /** 兜底的用户可读解析失败文案（不把堆栈/英文异常抛给用户）。 */
@@ -105,6 +100,9 @@ public class DocService {
 
     private final IdGen idGen;
 
+    /** 落盘目录配置（{@code storage.dir}）。 */
+    private final StorageProperties storageProperties;
+
     /** 显式事务模板：只用于"删子表 + 批量插入"这一段。 */
     private final TransactionTemplate transactionTemplate;
 
@@ -116,6 +114,7 @@ public class DocService {
      * @param apiOperationMapper  接口操作 Mapper
      * @param parserRegistry      解析器注册表
      * @param idGen                单号生成器
+     * @param storageProperties   落盘目录配置
      * @param transactionManager  事务管理器（用于构造 {@link TransactionTemplate}）
      */
     public DocService(DocSourceMapper docSourceMapper,
@@ -123,12 +122,14 @@ public class DocService {
             ApiOperationMapper apiOperationMapper,
             ParserRegistry parserRegistry,
             IdGen idGen,
+            StorageProperties storageProperties,
             PlatformTransactionManager transactionManager) {
         this.docSourceMapper = docSourceMapper;
         this.docSectionMapper = docSectionMapper;
         this.apiOperationMapper = apiOperationMapper;
         this.parserRegistry = parserRegistry;
         this.idGen = idGen;
+        this.storageProperties = storageProperties;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -248,17 +249,22 @@ public class DocService {
      */
     public DocDetailVO detail(Long id) {
         DocSource entity = requireDoc(id);
+        // LIMIT 与 VO 的截断上限共用 DocDetailVO.EMBED_LIMIT，避免两处各写一个数字
+        int embedLimit = DocDetailVO.EMBED_LIMIT;
         List<DocSection> sections = docSectionMapper.selectList(
                 Wrappers.<DocSection>lambdaQuery()
                         .eq(DocSection::getDocId, id)
                         .orderByAsc(DocSection::getSeqNo)
-                        .last("LIMIT " + DETAIL_EMBED_LIMIT));
+                        .last("LIMIT " + embedLimit));
         List<ApiOperation> operations = apiOperationMapper.selectList(
                 Wrappers.<ApiOperation>lambdaQuery()
                         .eq(ApiOperation::getDocId, id)
                         .orderByAsc(ApiOperation::getSeqNo)
-                        .last("LIMIT " + DETAIL_EMBED_LIMIT));
-        return DocDetailVO.of(entity, sections, operations);
+                        .last("LIMIT " + embedLimit));
+        // COUNT(*) 单独取：内嵌列表被截断时，前端靠它判断"还有多少没显示"
+        long totalSections = docSectionMapper.countByDocId(id);
+        long totalOperations = apiOperationMapper.countByDocId(id);
+        return DocDetailVO.of(entity, sections, operations, totalSections, totalOperations);
     }
 
     /**
@@ -536,7 +542,7 @@ public class DocService {
         try {
             return file.getBytes();
         } catch (IOException e) {
-            // 读上传流失败属基础设施问题（临时目录不可写等），用 50000 而不是 42001
+            // 读上传流失败属基础设施问题（容器临时目录不可写/磁盘满等），用 50000 而不是 42001
             log.error("[DOC-UPLOAD] 读取上传文件失败 name={}", file.getOriginalFilename(), e);
             throw new BizException(ErrorCode.E_INTERNAL, "文件读取失败，请稍后重试");
         }
@@ -545,9 +551,16 @@ public class DocService {
     /**
      * 落盘原始文件（便于后续 {@code reparse} 不必让用户重传）。
      *
-     * <p>目录取系统临时目录下的 {@code ai-testcase/docs/yyyyMMdd}：不污染工作区、不进 git；
-     * 代价是机器重启后可能被清理（此时 {@code reparse} 会提示"原始文件已丢失，请重新上传"）。
-     * 正式部署应改用可配置的持久目录，归 T14。</p>
+     * <p>目录取 {@code storage.dir}（默认 {@code ./uploads}，可用环境变量 {@code STORAGE_DIR}
+     * 覆盖）下的 {@code docs/yyyyMMdd}，按日期分层避免单目录堆积几十万文件。相对路径一律
+     * {@code toAbsolutePath().normalize()} 后再用——解析基准是后端进程的工作目录
+     * （{@code mvn spring-boot:run} 时是 {@code backend/}，{@code java -jar} 时是启动目录），
+     * 不转绝对路径会出现"同一个配置从不同目录启动落到两个地方"。首次建出当日目录时把实际
+     * 绝对路径打一行 INFO，排障时不必再猜。</p>
+     *
+     * <p>文件丢失的降级分支在 {@link #readStoredFile} 里：运维手工清过目录、或从别的机器
+     * 恢复了数据库而没恢复文件时，{@code reparse} 会提示"原始文件已丢失，请重新上传"，
+     * 而不是抛英文 IO 异常。</p>
      *
      * @param bytes   文件字节
      * @param docType 文档类型
@@ -555,15 +568,20 @@ public class DocService {
      */
     private String store(byte[] bytes, DocType docType) {
         try {
-            Path dir = Path.of(System.getProperty("java.io.tmpdir"), STORAGE_ROOT, STORAGE_DOCS,
-                    LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE));
+            Path baseDir = Path.of(storageProperties.getDir()).toAbsolutePath().normalize();
+            Path dir = baseDir.resolve(STORAGE_DOCS)
+                    .resolve(LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE));
+            boolean created = !Files.exists(dir);
             Files.createDirectories(dir);
+            if (created) {
+                log.info("[DOC-STORAGE] 原始文件目录已就绪 dir={}", dir);
+            }
             Path target = dir.resolve(UUID.randomUUID().toString().replace("-", "") + "." + docType.extension());
             Files.write(target, bytes);
             return target.toAbsolutePath().toString();
         } catch (IOException e) {
             // 磁盘满/权限问题 → 50000，不是"解析失败"
-            log.error("[DOC-UPLOAD] 落盘失败", e);
+            log.error("[DOC-UPLOAD] 落盘失败 dir={}", storageProperties.getDir(), e);
             throw new BizException(ErrorCode.E_INTERNAL, "文件保存失败，请检查服务端磁盘空间或权限");
         }
     }

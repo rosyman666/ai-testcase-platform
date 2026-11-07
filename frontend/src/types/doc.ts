@@ -67,6 +67,13 @@ export interface DocDetailVO {
   parseError: string;
   sectionCount: number;
   operationCount: number;
+  /**
+   * 章节/接口的**真实总数**（后端 `COUNT(*)`）。
+   * `sections` / `operations` 各只内嵌前 200 条，用这两个字段判断是否被截断；
+   * 拿 `sections.length` 顶替会把"被截了"误显示成"只有这么多"。
+   */
+  totalSectionCount: number;
+  totalOperationCount: number;
   createdAt: string;
   updatedAt: string;
   sections: DocSectionVO[];

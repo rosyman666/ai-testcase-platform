@@ -41,6 +41,10 @@ const METHOD_COLOR: Record<string, 'primary' | 'success' | 'warning' | 'error' |
  *
  * 章节按 `level` 缩进渲染成树，接口列表用表格。两者都是**内嵌预览**：
  * 后端详情接口各取前 200 条、章节正文截断到 1000 字，全量走 `/sections`、`/operations` 分页接口。
+ *
+ * **被截断时必须在列表底部说一句「已显示 x / 共 N 条」**：用户看不到后面的内容却不知道
+ * 为什么，比报错更难查。判断依据是后端返回的 `totalSectionCount` / `totalOperationCount`
+ * （`COUNT(*)` 真实值），不能用 `数组.length` 反推——那正好抹掉了截断信息。
  */
 export default function DocDetail(): JSX.Element {
   const { id } = useParams<{ id: string }>();
@@ -100,6 +104,10 @@ export default function DocDetail(): JSX.Element {
     color: 'default' as const,
   };
 
+  // 内嵌列表有上限：用后端给的 COUNT(*) 判断是否被截断，而不是拿数组长度猜
+  const sectionTruncated = data.totalSectionCount > data.sections.length;
+  const operationTruncated = data.totalOperationCount > data.operations.length;
+
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -135,7 +143,7 @@ export default function DocDetail(): JSX.Element {
       <Box className="grid gap-4 lg:grid-cols-2">
         <Paper variant="outlined" sx={{ p: 2 }}>
           <Typography variant="subtitle1" component="h2" gutterBottom>
-            章节结构（{data.sections.length} 条预览）
+            章节结构（共 {data.totalSectionCount} 条）
           </Typography>
           <Divider sx={{ mb: 1 }} />
           {data.sections.length === 0 ? (
@@ -161,11 +169,16 @@ export default function DocDetail(): JSX.Element {
               ))}
             </List>
           )}
+          {sectionTruncated && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              已显示 {data.sections.length} / 共 {data.totalSectionCount} 条
+            </Typography>
+          )}
         </Paper>
 
         <Paper variant="outlined" sx={{ p: 2 }}>
           <Typography variant="subtitle1" component="h2" gutterBottom>
-            接口列表（{data.operations.length} 条预览）
+            接口列表（共 {data.totalOperationCount} 条）
           </Typography>
           <Divider sx={{ mb: 1 }} />
           {data.operations.length === 0 ? (
@@ -197,6 +210,11 @@ export default function DocDetail(): JSX.Element {
                 ))}
               </TableBody>
             </Table>
+          )}
+          {operationTruncated && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              已显示 {data.operations.length} / 共 {data.totalOperationCount} 条
+            </Typography>
           )}
         </Paper>
       </Box>

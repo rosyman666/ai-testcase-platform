@@ -28,6 +28,29 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "storage")
 public class StorageProperties {
 
+    /** 默认落盘根目录。抽成常量是为了让 setter 的兜底分支和字段初值只用写一次。 */
+    private static final String DEFAULT_DIR = "uploads";
+
     /** 落盘根目录（相对工作目录；已在 .gitignore 中忽略）。 */
-    private String dir = "uploads";
+    private String dir = DEFAULT_DIR;
+
+    /**
+     * 设置落盘根目录，**空值/空白值回落到默认值**。
+     *
+     * <p><b>为什么必须自己兜这一层</b>：`${STORAGE_DIR:uploads}` 里的 `:默认值`
+     * 只处理"键不存在或不可解析"，**不处理"键存在但值为空"**。`.env` 里写成
+     * {@code STORAGE_DIR=}（有键无值）时，Spring 绑出来的是**空串**，于是
+     * {@code Path.of("")} 就是进程工作目录本身——文件会静默落到 {@code backend/docs/}
+     * 而不是 {@code backend/uploads/docs/}。症状是"刚传的文档打不开、重启又好了"，
+     * 而上传/解析/入库全部成功，**没有任何测试会红**。</p>
+     *
+     * <p>{@code trim()} 同样是必需的：{@code Path.of("  ")} 抛的是
+     * {@code InvalidPathException} 而**不是** {@code IOException}，会从
+     * {@code store()} 的 catch 里漏出去，最后变成英文的 50000。</p>
+     *
+     * @param dir 配置值，可为 null/空/空白
+     */
+    public void setDir(String dir) {
+        this.dir = (dir == null || dir.isBlank()) ? DEFAULT_DIR : dir.trim();
+    }
 }

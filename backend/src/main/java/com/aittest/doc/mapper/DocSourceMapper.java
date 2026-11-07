@@ -83,6 +83,26 @@ public interface DocSourceMapper extends BaseMapper<DocSource> {
     int physicalDeleteById(@Param("id") Long id);
 
     /**
+     * 更新落盘路径（复用分支发现原始文件丢失、按本次上传字节重新落盘后调用）。
+     *
+     * <p>{@code updated_at = updated_at} 是**故意**显式赋自身：本表有
+     * {@code ON UPDATE CURRENT_TIMESTAMP(3)}，不写这一句会把审计时间改成"补文件的时刻"，
+     * 而文档内容并没有变。"把丢失的原始文件放回去"不该算作一次内容更新——
+     * 这也是 §3.2.1.2 那条纪律的自动化版本。</p>
+     *
+     * @param id          文档 ID
+     * @param storagePath 新的相对路径
+     * @return 影响行数
+     */
+    @Update("""
+            UPDATE doc_source
+               SET storage_path = #{storagePath},
+                   updated_at = updated_at
+             WHERE id = #{id}
+            """)
+    int updateStoragePath(@Param("id") Long id, @Param("storagePath") String storagePath);
+
+    /**
      * 按文档 ID 查已删行（用于区分"不存在"与"已删除"给前端更准确的提示）。
      *
      * @param id 文档 ID

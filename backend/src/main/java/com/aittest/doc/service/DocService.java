@@ -27,6 +27,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -34,6 +35,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -105,6 +107,15 @@ public class DocService {
 
     /** 显式事务模板：只用于"删子表 + 批量插入"这一段。 */
     private final TransactionTemplate transactionTemplate;
+
+    /**
+     * 落盘根目录是否已经打过日志。
+     *
+     * <p>之前是按"当日目录是否新建"决定打不打，于是重启、运维预建目录、同一天第二次部署
+     * 都一行不打——等于"可观测"只在第一次成立。改成进程级一次性，排障时总能从日志里
+     * 找到"这个进程到底往哪个目录写"。</p>
+     */
+    private final AtomicBoolean storageLogged = new AtomicBoolean(false);
 
     /**
      * 构造注入。
@@ -183,6 +194,8 @@ public class DocService {
             boolean restored = existing.getDeleted() != null && existing.getDeleted() == 1;
             ParseStatus status = parseStatusOf(existing);
             if (!restored && status == ParseStatus.PARSED) {
+                // 秒回之前先确认原始文件还在；不在就顺手补回去（正常路径只是一次 isReadable）
+                healStorageIfMissing(existing, bytes, docType);
                 log.info("[DOC-UPLOAD] 命中缓存秒回 docId={} docNo={}", existing.getId(), existing.getDocNo());
                 return toResult(existing, true);
             }
@@ -551,38 +564,91 @@ public class DocService {
     /**
      * 落盘原始文件（便于后续 {@code reparse} 不必让用户重传）。
      *
-     * <p>目录取 {@code storage.dir}（默认 {@code ./uploads}，可用环境变量 {@code STORAGE_DIR}
-     * 覆盖）下的 {@code docs/yyyyMMdd}，按日期分层避免单目录堆积几十万文件。相对路径一律
+     * <p><b>返回的是相对 {@code storage.dir} 的路径</b>（如 {@code docs/20261107/<uuid>.md}），
+     * 不是绝对路径。绝对路径会把"根在当前机器上的取值"烧进每一行，于是"文件在哪"变成两个真源：
+     * 配置改了只影响新写入，历史行永远绑死在旧根。更直接的问题是换机器后
+     * {@code D:\code\...} 这种路径全部失效——README 承诺的"新机器三步跑通"就不成立了。
+     * 读取侧用 {@link #resolveStoredPath} 拼回，并对早期版本写入的绝对路径做兼容。</p>
+     *
+     * <p>目录是 {@code storage.dir}（默认 {@code ./uploads}，可用 {@code STORAGE_DIR} 覆盖）
+     * 下的 {@code docs/yyyyMMdd}，按日期分层避免单目录堆积几十万文件。相对路径一律
      * {@code toAbsolutePath().normalize()} 后再用——解析基准是后端进程的工作目录
      * （{@code mvn spring-boot:run} 时是 {@code backend/}，{@code java -jar} 时是启动目录），
-     * 不转绝对路径会出现"同一个配置从不同目录启动落到两个地方"。首次建出当日目录时把实际
+     * 不转绝对路径会出现"同一个配置从不同目录启动落到两个地方"。**每进程首次落盘**把实际
      * 绝对路径打一行 INFO，排障时不必再猜。</p>
-     *
-     * <p>文件丢失的降级分支在 {@link #readStoredFile} 里：运维手工清过目录、或从别的机器
-     * 恢复了数据库而没恢复文件时，{@code reparse} 会提示"原始文件已丢失，请重新上传"，
-     * 而不是抛英文 IO 异常。</p>
      *
      * @param bytes   文件字节
      * @param docType 文档类型
-     * @return 落盘绝对路径
+     * @return **相对** {@code storage.dir} 的落盘路径（正斜杠分隔）
      */
     private String store(byte[] bytes, DocType docType) {
         try {
-            Path baseDir = Path.of(storageProperties.getDir()).toAbsolutePath().normalize();
-            Path dir = baseDir.resolve(STORAGE_DOCS)
-                    .resolve(LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE));
-            boolean created = !Files.exists(dir);
+            Path baseDir = baseDir();
+            String day = LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE);
+            Path dir = baseDir.resolve(STORAGE_DOCS).resolve(day);
             Files.createDirectories(dir);
-            if (created) {
-                log.info("[DOC-STORAGE] 原始文件目录已就绪 dir={}", dir);
+            if (storageLogged.compareAndSet(false, true)) {
+                log.info("[DOC-STORAGE] 原始文件根目录 dir={}", baseDir);
             }
-            Path target = dir.resolve(UUID.randomUUID().toString().replace("-", "") + "." + docType.extension());
-            Files.write(target, bytes);
-            return target.toAbsolutePath().toString();
+            String fileName = UUID.randomUUID().toString().replace("-", "") + "." + docType.extension();
+            Files.write(dir.resolve(fileName), bytes);
+            // 统一用正斜杠：这个字符串会进数据库并在换平台后被 Path.of 解析，Windows 分隔符
+            // 在 Linux 上会被当成文件名字符
+            return STORAGE_DOCS + "/" + day + "/" + fileName;
         } catch (IOException e) {
-            // 磁盘满/权限问题 → 50000，不是"解析失败"
+            // 磁盘满/权限问题 → 50000，不是"解析失败"。InvalidPathException 不在此列，
+            // 它属 RuntimeException；配置值的空/空白已在 StorageProperties.setDir 兜住
             log.error("[DOC-UPLOAD] 落盘失败 dir={}", storageProperties.getDir(), e);
             throw new BizException(ErrorCode.E_INTERNAL, "文件保存失败，请检查服务端磁盘空间或权限");
+        }
+    }
+
+    /**
+     * 定位落盘根目录的绝对路径。
+     *
+     * @return 规范化后的绝对路径
+     */
+    private Path baseDir() {
+        return Path.of(storageProperties.getDir()).toAbsolutePath().normalize();
+    }
+
+    /**
+     * 把库里存的 {@code storage_path} 解析成可读的绝对路径（双模式）。
+     *
+     * <p>相对路径按 {@code storage.dir} 拼回；绝对路径原样使用——T03 早期版本把绝对路径
+     * 直接入库（当时的实现如此），那些历史行不能因为改了语义就读不出来。这条兼容分支
+     * 属于**过渡期**，等存量数据清空后可以删（退役条件记在 §9）。</p>
+     *
+     * @param storagePath 库里的值，不可为空白
+     * @return 绝对路径
+     */
+    private Path resolveStoredPath(String storagePath) {
+        Path path = Path.of(storagePath);
+        return path.isAbsolute() ? path : baseDir().resolve(path).normalize();
+    }
+
+    /**
+     * 判断落盘文件是否可读（把"路径非法"也归为不可读）。
+     *
+     * <p><b>为什么要单独兜 {@code InvalidPathException}</b>：它是
+     * {@code RuntimeException}，**不继承 {@code IOException}**。库里 {@code storage_path}
+     * 若是脏值（早期版本写入后被 SQL 字面量吃掉反斜杠、人工改库改坏、跨平台迁移留下的
+     * 不合法字符），{@code Path.of} 会直接抛它，一路冒到兜底处理器变成英文的
+     * {@code 50000 系统内部错误}——和"文件丢了"是同一件用户可处置的事，却给了个
+     * 无法处置的错误码。这里统一降级成"不可读"，由调用方按"文件丢失"处理。</p>
+     *
+     * @param storagePath 库里的路径值
+     * @return 可读返回 true
+     */
+    private boolean isStoredFileReadable(String storagePath) {
+        if (StringUtils.isBlank(storagePath)) {
+            return false;
+        }
+        try {
+            return Files.isReadable(resolveStoredPath(storagePath));
+        } catch (RuntimeException e) {
+            log.warn("[DOC-STORAGE] storage_path 非法，按文件丢失处理 path={}", storagePath, e);
+            return false;
         }
     }
 
@@ -594,19 +660,42 @@ public class DocService {
      */
     private byte[] readStoredFile(DocSource entity) {
         String path = entity.getStoragePath();
-        if (StringUtils.isBlank(path)) {
-            throw new BizException(ErrorCode.E_DOC_PARSE_FAILED, "原始文件已丢失，请重新上传该文件后再解析");
-        }
-        Path file = Path.of(path);
-        if (!Files.isReadable(file)) {
+        if (!isStoredFileReadable(path)) {
             throw new BizException(ErrorCode.E_DOC_PARSE_FAILED, "原始文件已丢失，请重新上传该文件后再解析");
         }
         try {
-            return Files.readAllBytes(file);
+            return Files.readAllBytes(resolveStoredPath(path));
         } catch (IOException e) {
             log.error("[DOC-REPARSE] 读取原始文件失败 path={}", path, e);
             throw new BizException(ErrorCode.E_INTERNAL, "原始文件读取失败，请稍后重试");
         }
+    }
+
+    /**
+     * 复用分支的自愈：库里那行说"已解析"，但落盘文件不在了，就把这次上传的字节重新落盘并更新路径。
+     *
+     * <p><b>为什么必须有这一步</b>：查重命中 {@code PARSED} 时原来是直接秒回，**不会再落盘**。
+     * 于是"行在、字节丢"（运维清了目录、换机器只恢复了库、早先版本写进 tmpdir 被系统清理）
+     * 是一种<b>永久不可自愈</b>的状态：用户把同一个文件再传一次，只会拿到 {@code reused:true}，
+     * 路径仍指向空文件，只有主动点重新解析才会发现丢了。而 §3.2 给 {@code storage_path} 的
+     * 存在理由正是"原始文件可回溯"——回溯能力被破坏却没有恢复路径，等于这句话不成立。</p>
+     *
+     * <p>成本几乎为零：正常路径下就是一次 {@code Files.isReadable}。</p>
+     *
+     * @param entity  命中的文档实体（会被就地更新 {@code storagePath}）
+     * @param bytes   本次上传的字节
+     * @param docType 文档类型
+     */
+    private void healStorageIfMissing(DocSource entity, byte[] bytes, DocType docType) {
+        String oldPath = entity.getStoragePath();
+        if (isStoredFileReadable(oldPath)) {
+            return;
+        }
+        String newPath = store(bytes, docType);
+        docSourceMapper.updateStoragePath(entity.getId(), newPath);
+        entity.setStoragePath(newPath);
+        log.warn("[DOC-UPLOAD] 命中文档的原始文件已丢失，已按本次字节重新落盘 docId={} oldPath={} newPath={}",
+                entity.getId(), oldPath, newPath);
     }
 
     /**
@@ -619,8 +708,8 @@ public class DocService {
             return;
         }
         try {
-            Files.deleteIfExists(Path.of(entity.getStoragePath()));
-        } catch (IOException e) {
+            Files.deleteIfExists(resolveStoredPath(entity.getStoragePath()));
+        } catch (IOException | InvalidPathException e) {
             log.warn("[DOC-DELETE] 删除落盘文件失败 path={}（不影响主流程）", entity.getStoragePath(), e);
         }
     }

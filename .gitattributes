@@ -1,0 +1,22 @@
+# 统一换行符：仓库内一律 LF，避免 Windows/macOS 协作时整个文件显示为"全改"
+* text=auto eol=lf
+
+# Windows 脚本必须是 CRLF，否则 cmd 解析异常
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做换行转换，也不做 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.xlsx binary
+*.docx binary
+*.jar binary
+
+# 文档与源码的 diff 更可读
+*.md text diff=markdown
+*.java text diff=java
+*.ts text diff=javascript

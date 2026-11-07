@@ -1,0 +1,53 @@
+# ---------- Java / Maven ----------
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+*.class
+*.jar
+*.war
+*.log
+hs_err_pid*
+replay_pid*
+
+# ---------- Node / 前端 ----------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 环境变量与密钥（AI Key 绝不能进仓库）----------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---------- 数据库与运行时数据 ----------
+*.sql.bak
+data/
+uploads/
+logs/
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 测试与覆盖率 ----------
+coverage/
+.nyc_output/

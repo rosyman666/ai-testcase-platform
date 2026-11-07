@@ -21,6 +21,8 @@ const DocListPage = lazy(() => import('@/pages/docs/DocList'));
 const DocDetailPage = lazy(() => import('@/pages/docs/DocDetail'));
 // T04：提示词模板（列表 / 详情 / 试跑三合一，不单独开详情路由）
 const PromptTemplateListPage = lazy(() => import('@/pages/prompts/PromptTemplateList'));
+// T05：测试点评审（按文档查看，所以路由带 docId）
+const TestPointReviewPage = lazy(() => import('@/pages/testpoints/TestPointReviewPage'));
 
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
@@ -101,6 +103,15 @@ export const router = createBrowserRouter([
         element: (
           <PageBoundary>
             <PromptTemplateListPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T05 测试点评审：列表永远属于某一篇文档，所以 docId 进路径而不是查询串
+        path: '/testpoints/:docId',
+        element: (
+          <PageBoundary>
+            <TestPointReviewPage />
           </PageBoundary>
         ),
       },

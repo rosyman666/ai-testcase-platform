@@ -9,6 +9,7 @@ import Divider from '@mui/material/Divider';
 import List from '@mui/material/List';
 import ListItem from '@mui/material/ListItem';
 import Paper from '@mui/material/Paper';
+import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
@@ -129,9 +130,18 @@ export default function DocDetail(): JSX.Element {
             </Typography>
           </Box>
         </Box>
-        <Button variant="outlined" disabled={reparseMutation.isPending} onClick={() => reparseMutation.mutate()}>
-          {reparseMutation.isPending ? '解析中…' : '重新解析'}
-        </Button>
+        <Stack direction="row" spacing={1.5}>
+          <Button
+            variant="outlined"
+            disabled={data.parseStatus !== 'PARSED'}
+            onClick={() => navigate(`/testpoints/${data.id}`)}
+          >
+            测试点评审
+          </Button>
+          <Button variant="outlined" disabled={reparseMutation.isPending} onClick={() => reparseMutation.mutate()}>
+            {reparseMutation.isPending ? '解析中…' : '重新解析'}
+          </Button>
+        </Stack>
       </Box>
 
       {data.parseStatus === 'FAILED' && (

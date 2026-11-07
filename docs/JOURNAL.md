@@ -161,6 +161,77 @@
 
 ---
 
+## 2026-11-07 · 阶段 4 · T02 通用基础设施与鉴权闭环
+
+### 做了什么
+
+1. **统一错误语义**：`common/ErrorCode.java`（12 个错误码，`4xxxx` 业务 / `5xxxx` 系统，全部带 `HttpStatus`）、`common/BizException.java`（service/domain 层**唯一**允许主动抛的异常）、`common/GlobalExceptionHandler.java`（把参数校验、404、唯一键冲突、未知异常统一翻译成 `{code,message,data,traceId}`，并把堆栈留在日志里而不是响应体里）。
+2. **分页与序列化契约**：`common/PageQuery.java`（把 `page/size` 收口，限制上限防 `size=100000` 打挂库）、`common/PageResult.java`；`JacksonConfig` 为 `Long`/`long` 注册 `ToStringSerializer`、为 `Instant` 注册固定 3 位毫秒格式。
+3. **枚举单一真源**：`common/enums/` 下 11 个枚举 + `CodedEnum` 接口，每个枚举自带 `code`/`label`，前端靠 `GET /api/system/enums` 取字典，避免前后端各写一份中文。
+4. **鉴权闭环**：`auth/`（`AuthController` + `AuthService` + `TokenService` + `AuthContext` + `AuthInterceptor`），`V3__seed_admin_user.sql` 播种 `admin/admin123`（BCrypt），登录发 token、拦截器校验并把当前用户放进 `ThreadLocal`。
+5. **审计字段自动填充**：`MybatisPlusConfig` 里的 `AuditMetaObjectHandler` 统一写 `createdAt`/`updatedAt`，业务代码禁手写。
+6. **前端**：`api/http.ts` 统一出口（拦截 `code !== 0`、带 `Authorization`、统一错误 toast）、`api/system.ts`、`store` 保存登录态、`pages/Login.tsx`、`routes/index.tsx`（`/login`、`/`、`*` 兜底）。
+7. **异步基础设施预留**：`config/AsyncConfig.java`（有界线程池，给 T05 的任务引擎用）、`config/AiProperties.java`（provider/model/base-url/api-key 四个键）。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| `ApiResponse` 只有 4 个字段（`code`/`message`/`data`/`traceId`） | 前端只需要判断 `code === 0`，字段越少契约越稳 | 加 `success`/`timestamp`/`path`（每个都要前端配合，收益为零） |
+| 枚举中文名放后端而非前端 | 导出 Excel 与 JUnit 注释里写的是中文，若前端各存一份，改文案时两边会分叉 | 前端维护 `label` 映射（改动要发两次版） |
+| `AuthInterceptor` 而非 Spring Security | 本项目只有"登录/未登录"两种身份，引 Security 要配 `SecurityFilterChain`、CSRF、密码编码器，成本远超收益 | Spring Security（能力过剩） |
+| 审计字段用 `MetaObjectHandler` 而非 DDL 默认值 | DDL `DEFAULT` 只在**不传该列**时生效；MP 的 insert 会把字段名带上（传 null），默认值根本不触发 | 只靠 `DEFAULT CURRENT_TIMESTAMP(3)`（实测不生效） |
+| `@MapperScan("com.aittest.**.mapper")` 精确包名 | T01 的教训：通配 `com.aittest` 会把业务接口误注册成 Mapper | 通配根包 |
+
+### 踩坑记录
+
+1. **`isSuccess()` 把响应体从 4 字段变成 5 字段（最隐蔽）**：`ApiResponse` 上写了 `public boolean isSuccess()`，Jackson 按 bean getter 规则序列化出一个 `"success": true` 字段——**没人调用它，它自己冒出来了**。QA 用 `PageResult.isHasNext()` 同类泄漏证明了机制确实活着。解法：删掉 `isSuccess()`，判成功一律用 `code == 0`。**教训**：BO/VO 上任何 `isXxx()`/`getXxx()` 都会被序列化，加方法前先想"这会不会多一个 JSON 字段"。
+2. **`NoResourceFoundException` 落到了 50000**：Spring 6.1 把 404 从 `NoHandlerFoundException` 换成了 `NoResourceFoundException`，而全局处理器只认前者，于是访问不存在的路径返回"系统内部错误"。解法：补处理器映射到 `40401`。
+3. **`created_at` 断言测错了对象**：T02 原本计划"断言 `created_at` 与 `UTC_TIMESTAMP(3)` 相差 < 2 秒"，但 `created_at` 是 `AuditMetaObjectHandler` 用 **JVM 时钟**写的，与数据库会话时区无关——这个断言无论如何都过，测不出任何东西。改为在**同一条连接**上断言 `SELECT CURRENT_TIMESTAMP(3), UTC_TIMESTAMP(3), @@session.time_zone`，另加一个 JVM 侧用例（把 JVM 时区改成 `Asia/Shanghai`，断言 MP 写入仍是 UTC）。**这就是本项目"两个独立时间源"的由来**。
+4. **`serverTimezone=UTC` 不改会话时区**：MySQL 8 里它只是 `connectionTimeZone` 的别名，会话仍跟随 `@@global.time_zone`（本机 `SYSTEM` = 东八区）。必须再加 `forceConnectionTimeZoneToSession=true`。（完整论证见 §3.2.1 与 D-12/D-16）
+5. **`eslint-plugin-react-hooks@^4.6` 与 `eslint@^9` 的 peer 冲突**：报错指向 eslint 而非该插件，极难定位；提到 `^5.0.0` 解决（D-06）。
+6. **工程师越权**：我在等用户批复时，工程师已经写好了 7 个 T02 文件。用 `git status` 发现、`git stash push -u` 保全、`TaskStop` 停手。**根因在我**：任务提示只写了"只做 T0x"，没写"交付后停手等确认"。之后所有派单都加了这句。
+
+### 下一步
+
+- T02 热修：`IdGen` 重启必撞唯一键（见下一条记录）
+- T03 文档接入与解析
+
+---
+
+## 2026-11-07 · 阶段 4.5 · T02 热修 · IdGen 重启必撞键
+
+### 做了什么
+
+1. **`common/IdGen.java` 重写分配机制**：计数器从「三个前缀共用 `currentDay`/`currentSeq`」改为「按 `前缀+日期` 隔离的 `Map`」；新增 `NoType` 枚举（前缀 + 中文名绑定）、`SeqSeeder` 函数式接口、`nextAfterConflict`（丢缓存重播种）、`generateWithRetry(type, action)`（取号→写库→撞键重播种，最多 3 次）。
+2. **新增 `config/IdGenSeederConfig.java`**：用**裸 `JdbcTemplate`** 查「该前缀该日期已占用的最大序号」作为播种起点，SQL 刻意**不带 `deleted = 0`**。
+3. **两处超限改成业务错误**：撞键 3 次耗尽 → `40901`；当日序号达 6 位上限（999999）→ `40901`。旧实现在这两种情况下要么落 `50000`，要么直接输出 7 位序号破坏格式。
+4. **独立验收程序实跑**（未入库，跑完即删）：12 条断言全过 —— 前缀隔离 4 条、重启自愈 2 条、软删行播种 2 条、多实例撞键重播种 4 条。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 「播种 + 重试」而非「撞库兜底」 | 撞库重试**不是分配机制**：单进程靠撞 N 次换一个能用的号，多实例两个进程各自从 1 开始会互撞 | 纯进程内计数器（重启必崩）、数据库序列表（单机每天几百条，过度设计） |
+| 播种用裸 `JdbcTemplate` 而非 MyBatis-Plus | MP 会给查询自动注入 `deleted = 0`，而唯一索引根本不管逻辑删标记——软删行照样占号，用 MP 播种必然偏小 | MP `BaseMapper`（播种值偏小 = 热修失效） |
+| 撞键后**重新播种**而非 `++` | 多实例下 `++` 会连撞：两个进程播种到 5、同时取 6，一个成功一个失败，`++` 得 7，而库里可能已有 7 | 简单 `++`（多实例收敛不了） |
+| 计数按前缀隔离 | 三个前缀共用一个计数器会让 `doc_no` 跳号（传 3 个文档后建任务从 `000004` 起），而单号要写进 Excel 与 JUnit 注释供人追溯，跳号会被误判成数据丢失 | 共用计数器（省 3 行代码，换来"数据丢失"的误判） |
+| 播种**懒执行**（首次取号才查库） | 不在启动时跑，就不与 Flyway 的迁移顺序耦合，也不会因启动期数据库没就绪而失败 | `@PostConstruct` 里查库（迁移未必跑完） |
+
+### 踩坑记录
+
+1. **原代码注释就是错的**：「调用方捕获唯一键冲突重试即可」——把兜底写成了机制。正确说法是"撞键是异常路径，正常路径必须靠播种起始值正确"。
+2. **溢出**：`seq = seed + 1; if (seq > SEQ_MAX)` 在 `seed` 接近 `Integer.MAX_VALUE` 时溢出成负数，判断恒不成立，会吐出负数序号。改为**先比后加**（`if (used >= SEQ_MAX) throw`）。
+3. **我自己的验收脚本第一版断言错了**：我断言"两个实例第一次就撞号"，实际没撞——因为播种是懒的，第二个实例取号时第一个已经落库了，它自然播到了新值。要真正触发撞键路径，得让第三个"进程"抢先占号。**教训**：测试跑出 FAIL 时先怀疑断言，别急着改被测代码。
+4. **死代码**：`seqPartOf` 全仓无调用，且 Javadoc 写 `prefix.length() + DAY_LENGTH + 1`、实现写死 `1 + 8 + 1`，注释与代码自相矛盾。删掉。
+
+### 下一步
+
+- 推送双仓（`origin` + `gitee`）
+- T03 文档接入与解析（25 个文件）
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

@@ -685,11 +685,31 @@ erDiagram
 
 | 步骤 | 动作 |
 |---|---|
-| 1 | `upload` 先算 `file_hash`，用**自定义 SQL** 查 `WHERE file_hash = ?`（不带 `deleted` 条件，绕过逻辑删注入） |
+| 1 | `upload` 先算 `file_hash`，用**自定义 SQL** 查（见下方"查重 SQL 的三个必备条件"，不带 `deleted` 条件，绕过逻辑删注入） |
 | 2 | 命中 `deleted=0` → 走"秒回"，直接复用，不解析、不花钱 |
 | 3 | 命中 `deleted=1` → **复用该行**：`UPDATE ... SET deleted=0, parse_status='PENDING', parse_error='', updated_at=NOW(3)`，`doc_no` 保持不变 |
 | 4 | 重新解析，**物理覆盖** `doc_section` / `api_operation`（先 `DELETE ... WHERE doc_id=?` 再批量插入），不残留旧章节 |
 | 5 | **不新建** `doc_source` 行 |
+
+**查重 SQL 的三个必备条件（少一个就出事故）**
+
+```sql
+SELECT * FROM doc_source
+WHERE file_hash = #{fileHash}
+  AND file_hash <> ''                                  -- ① 必须排除空串
+ORDER BY deleted ASC, updated_at DESC                  -- ② 优先未删；同状态取最新
+LIMIT 1
+```
+
+| # | 条件 | 漏了会怎样 |
+|---|---|---|
+| ① | **`file_hash <> ''`** | `file_hash` 是 `VARCHAR(64) NOT NULL DEFAULT ''`。凡 hash 为空串的行（算 hash 失败的历史数据、手工灌的演示数据）会**互相命中** → 恢复逻辑把 A 文档的内容覆盖到 B 文档上，且不报错。这是本路径**最危险**的一个坑 |
+| ② | **`ORDER BY deleted ASC, updated_at DESC`** | `file_hash` 索引是 **`KEY idx_doc_source_file_hash`（非唯一）**，同一 hash 可能有多条 `deleted=1`（删过多次）。不排序就变成"随机捞一条恢复"，恢复出来的可能是最老的那份、`doc_no` 也对不上最近的导出记录 |
+| ③ | **`LIMIT 1`** | 同 hash 多行时会取到多行，`selectOne` 直接抛 `TooManyResultsException` |
+
+**刻意不加 `uk(file_hash)`，不要"顺手优化"**：① 物理上允许同一文件存在多条历史行，是"删→传→删→传"的自然结果，加唯一约束会让恢复路径报 `DuplicateKey`；② 并发上传同一文件时，唯一约束会把两个请求变成"一个成功一个 500"，而没有唯一约束时两个请求都能成功、只是多一条历史行——后者由 `ORDER BY ... LIMIT 1` 与步骤 3 的复用逻辑收敛，是可接受的；③ `DEFAULT ''` 与唯一索引天然冲突（多条空串直接撞键）。**代价**：并发上传可能短暂产生两条 `deleted=0` 的行，T03 不必为它加分布式锁，只要保证后续查询按上述 `ORDER BY` 取到稳定的那一条即可。
+
+**边界约定**：若命中的记录 `deleted=1` **且** `parse_status='FAILED'`（当初就没解析成功），同样走恢复 + 重解析，不要分支处理——多一条分支就多一个没人测的路径。
 
 **为什么不能新建（三条硬理由）**
 
@@ -1324,12 +1344,17 @@ spring:
 | `AI_PROVIDER` | `${AI_PROVIDER:mock}` | `mock`（离线可跑） | ❌ |
 | `AI_BASE_URL` | `${AI_BASE_URL:}` | 空 | ❌ |
 | `AI_API_KEY` | `${AI_API_KEY:}` | 空 → 真实 provider 调用时抛 `E_LLM_UPSTREAM` 并给出可读原因 | ✅ **禁止入库** |
-| `AI_MODEL` | `${AI_MODEL:}` | 空 | ❌ |
+| `AI_MODEL` | `${AI_MODEL:mock-model}` | **`mock-model`（不能是空串）** | ❌ |
 | `AI_TIMEOUT_SECONDS` | `${AI_TIMEOUT_SECONDS:60}` | 60 | ❌ |
 | `AI_TEMPERATURE_TESTPOINT` / `_GENERATE` / `_REPAIR` | 同名占位符 | 0.2 / 0.4 / 0.0 | ❌ |
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USERNAME` | 同名占位符 | `127.0.0.1` / `3306` / `ai_testcase` / `root` | ❌ |
 | `DB_PASSWORD` | `${DB_PASSWORD:}` | **空字符串**（本地 root 空密码可直接跑） | ✅ **禁止入库** |
 | `SPRING_PROFILES_ACTIVE` | `${SPRING_PROFILES_ACTIVE:dev}` | `dev` | ❌ |
+| `SERVER_PORT` | `${SERVER_PORT:8080}` | `8080` | ❌ |
+
+**`AI_MODEL` 的缺省值必须是 `mock-model`，不能是空串**——`V2__dict_and_config.sql` 的 `model_price` 种子行里 mock 的 `model` 正是 `mock-model`（单价 0/0）。若缺省为空串，`llm_call_log.model = ''` 与 `model_price.model` 关联不上 → 成本归集查不到单价，mock 演示的成本恒为 0 且**看不出是"算对了"还是"没算"**。这属于"明确非敏感值"，不违反下面"禁止默认密码/Key"的硬约束。
+
+**`SERVER_PORT` 的特殊坑**：Spring 宽松绑定会把它直接映射成 `server.port`，且**环境变量优先级高于 `application.yml`**。本机沙箱注入 `SERVER__PORT=59173` 时应用会抢 59173 启动、vite proxy 打 8080 全部 404——这就是 §11.1 **D-07** 加 `spring-boot:run` 端口锁的直接原因。换端口请用 `SERVER_PORT=9090`（认这个）或 `mvn spring-boot:run -Dapp.port=9090`（绕过环境变量），不要两处混填。
 
 **占位符一律写成 `${KEY:默认值}` 形式**，不写 `${KEY}`。理由：不写默认值时缺失即启动失败，而本项目要求"克隆下来零配置能跑起来"（mock provider + 本地空密码 MySQL）。
 

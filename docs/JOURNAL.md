@@ -277,6 +277,65 @@
 
 ---
 
+## 2026-11-07 · 阶段 6 · T04 模型接入层与提示词模板
+
+### 做了什么
+
+1. **`aicore` 的 6 个基础类**：`LlmProvider`（接口：`name()` / `supports(model)` / `chat()`）、`LlmRequest`（Lombok Builder，同时装"发给上游的"和"只用于记账的"两类字段）、`LlmResponse`、`LlmMessage`（`record` + 三个静态工厂）、`LlmUsage`（`totalTokens()` 是**派生值**）、`LlmException`（带 `ErrorCode` + `retryable`）。
+2. **两个真实 provider + 路由**：`MockLlmProvider`（无 Key、确定性、按输入 SHA-256 选样，并用 `[[MOCK:xxx]]` 标记构造 6 类坏路径）、`OpenAiCompatibleProvider`（OkHttp 单例、超时/状态码分支、`retryOnConnectionFailure(false)`）、`LlmProviderRouter`（别名表 + 启动时对 `ai.fallback.enabled` 打 WARN）。
+3. **记账装饰器 `LoggingLlmProvider`**：计时 → 转发 → 落 1 条 `llm_call_log` → 原样返回/抛出。成功、`RuntimeException`、`Error` 三条路径各落 1 条。
+4. **成本**：`ModelPrice` / `ModelPriceMapper` / `ModelPriceCache`（5 分钟 TTL），单位是"每 1M token 的微元数"，`costMicro` 四舍五入到整数微元。
+5. **结构化输出三件套**：`JsonRepairer`（去围栏 → 括号配对截取 → 截断补全 → 语法归一化）、`JsonSchemaValidator`（networknt Draft-07，错误消息带 `[2].priority` 这样的字段路径）、`StructuredOutputParser`（裸数组/对象解包两种形态）。
+6. **提示词模板四件套**：`PromptTemplate`（实体）、`PromptTemplateLoader`（启动幂等 seed 4 个 `.md`）、`PromptRenderer`（`{{var}}` 单趟替换）、`PromptTemplateService`（列表/详情/新建版本/激活/渲染/**试跑**），配 `PromptTemplateController` 与 5 个 DTO。
+7. **模板与 schema 资源**：`prompts/{testpoint_extract,case_generate,case_repair,failure_triage}.v1.md`（YAML front-matter + 中文正文 + few-shot + 禁止事项）、`schema/{testpoint,testcase,failure_triage}.schema.json`。
+8. **错误码分流落地**：`ErrorCode` 新增 `E_FIELD_TOO_LONG(40004)` / `E_DUPLICATE(40902)`，`ColumnWhitelist` 把 `Data too long for column 'x'` 的列名翻成中文标签，`GlobalExceptionHandler` 新增 `DataIntegrityViolationException` 三分支（1406 / 1062 / 其余兜底）。
+9. **前端**：`api/prompt.ts` + `pages/prompts/PromptTemplateList.tsx`（列表 + 详情弹窗 + 试跑结果芯片）+ `/prompts` 懒加载路由 + 首页"业务入口"两个按钮。
+10. **测试**：4 个单测类共 32 条（`StructuredOutputParserTest` 12 / `PromptRendererTest` 7 / `GlobalExceptionHandlerTest` 8 / `LlmExceptionHandlerTest` 5），全部不依赖网络、不依赖数据库。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 记账做成**装饰器**且**不实现** `LlmProvider` 接口 | 调用点有 4 个 × 成功/失败 = 8 条分支，逐条手写必有一条漏，而漏掉只会让看板数字慢慢变小、**没有任何测试会红**。不实现接口是为了防止"装饰器包装饰器"→ 一次调用落 2 条台账（表现为"成本翻倍但调用次数正常"，极难发现） | 每个调用点自己写 `log`；或让装饰器 `implements LlmProvider` 以便统一 resolve |
+| 记账字段塞进 `LlmRequest` 而不是"调用方事后补日志" | 装饰器只看得到请求对象。事后补日志等于把 8 条分支各写一遍，同样必有一条漏字段 | 请求对象只放"发给上游的"，记账另开一个 `CallContext` |
+| `ModelPrice` 用 `effectiveFrom` + 内存取最新，不用 `GROUP BY model` | `SELECT input_price_micro ... GROUP BY model` 依赖 MySQL 宽容模式，`ONLY_FULL_GROUP_BY` 下直接报 1055 | 一条 SQL 拿到最新单价 |
+| 修复器**只对括号不配平**的文本做截断补全 | 对完整 JSON 也补全会退到"最后一个安全点"，把尾字段切掉——输出**依然合法、依然能解析**，只是静默少字段 | 无条件调用 `completeTruncated`（第一版就是这么写的，被端到端抓出来） |
+| 语法修不好 → `50004`；结构不对 → `50005`，两者不合并 | 前者是"模型没按格式说话"（改提示词/换模型），后者是"格式对了但内容不合约定"（改 schema/改模板），处置方向完全不同 | 统一一个 `E_LLM_OUTPUT_INVALID` |
+| 模板版本号**不入参**，服务端 `MAX(version)+1` | 让前端传 → 两人同时提交撞成同一个号，然后就有人"顺手"让它覆盖；模板一旦可覆盖，`test_case.prompt_version` 指向的就是内容已经变了的东西，回溯彻底失效 | 前端传 `version` |
+| 新建版本/激活都先 `deactivateByCode` 再写 | 反过来会有一瞬间两行 `is_active=1`，而 `selectActiveByCode` 带 `LIMIT 1` **不报错**，只表现为"有时候用新版、有时候用旧版" | 一条 `CASE WHEN` 的 UPDATE（行锁顺序不同会死锁） |
+| `activate` 时 `updated_at = updated_at` 抑制 `ON UPDATE` | `is_active` 是"版本管理状态"不是"内容修改"；`updated_at` 该回答"这版内容最后改于何时" | 让它自动更新（审计语义被稀释） |
+| 缺变量**一次列全**并抛 `40001` | 一次只报一个，用户要试 4 次才能填完 | 遇到第一个缺失就返回 |
+| 模板 seed 用**显式清单**而不是通配 `prompts/*.md` | 目录里放一个草稿就会被 seed 进生产 | `PathMatchingResourcePatternResolver` 通配 |
+| `PromptTemplateLoader` **不用** `@Transactional` | ① 自调用不走代理，注解根本不生效；② 也不需要——"半成品状态下次启动自动补齐"，绑事务反而让"第 4 个文件写错 → 前 3 个永远装不进" | 整个 seed 包一个事务 |
+| 试跑端点 `POST /{id}/preview` **不落库** | 它是"看这条提示词会调出什么"，不是一次业务生成；落库会污染任务表 | 复用 T05 的生成接口 |
+| `LlmException` 的翻译放 `aicore/LlmExceptionHandler` 而不是 `common` | 放 `common` 就形成 `common → aicore → common` 包级循环，以后想把 `common` 抽成 starter 会被这一个 import 卡住 | 塞进 `GlobalExceptionHandler`（省一个文件，代价是循环依赖） |
+
+### 踩坑记录
+
+1. **修复器把"好 JSON"修坏了（本阶段最重要的一个 bug）**：端到端跑 `failure_triage` 时 schema 报"未找到所需属性 `reason`"，而模型返回的 JSON 里明明有。根因是 `repairWithMeta` **无条件**调 `completeTruncated`，它退到"最后一个安全点"（最后一个逗号）把尾字段切掉，补完括号后**语法合法、能解析、只是少了一个字段**。修正两处：① `String completed = truncated ? completeTruncated(body) : body;`；② 逗号只有在它是**数组元素分隔符**（`stack.peek() == ']'`）时才算安全点。**这个 bug 的可怕之处是它不抛异常**——"半个用例被当成完整用例入库"就是这么来的。
+2. **`LlmException` 没有任何处理器接住**：它继承 `RuntimeException` 而非 `BizException`，一路冒到 `GlobalExceptionHandler` 的兜底分支 → 用户看到 `50000 服务器开小差了`，而**台账里记的是 `E_LLM_UPSTREAM`**。于是"账本正常、用户被误导"，任何只看台账或只看 HTTP 状态（都是 200）的检查都不会红。补 `LlmExceptionHandler` 后返回 `50001` + `data.retryable`（D-25）。
+3. **`Long` 被全局序列化成字符串**：`latencyMs` 用 `Long` 时前端拿到 `"153"`，按字典序排序 `"90" > "153"`。改成 `Integer`。
+4. **`SERVER_PORT=8096` 不起作用，实际起在 8080**：沙箱注入了 `SERVER__PORT`，环境变量优先级高于 yml。改用 `-Dapp.port=8097`（系统属性优先级更高，且 pom 的 `jvmArguments` 已锁定）。
+5. **`nohup ... &` 起的进程被沙箱杀掉**：改用受管后台任务。
+6. **我自己的脚本把 `mysql` 密码参数插错了位置**：`cmd.insert(4, "-p" + pwd)` 插到了 `-P` 前面，`-P` 把 `-p123456` 当成端口值（`option 'port': value -p123456 adjusted to 0`），密码根本没传 → `Access denied (using password: NO)`。改用 `MYSQL_PWD` 环境变量，彻底避开短选项取值歧义。
+7. **`40004` / `40902` 在页面上根本不可达**：设计时设想"`doc_no` 插重复 → `40902`、`title` 超 500 → `40004`"，实测发现 `doc_no` 重复会被 `IdGen.generateWithRetry` 吸收（重播种 3 次后抛 `40901`），`title` 属 T05 才建的表，而所有写入口都有前置守卫（DTO `@Size` / 解析器 `requireFitsColumn` / 文件名 `truncate`）。这不代表代码有问题——**它们本来就是"最后一道网"**，可达性低正是设计目标；但验收方式必须改：单测构造真实 MySQL 错误消息（8 条）+ 一条真实并发 HTTP 断言，而不是假装能"插重复值"。
+8. **并发撞 1062 第一版跑了 5 轮一次都没撞上**：两个事务都快到可能完全串行，后到的那个读到新 `MAX` 就排到下一个版本号。改成用外部 MySQL 会话对该 `code` 加行锁（`SELECT ... FOR UPDATE`），把两个 HTTP 事务同时卡在 `deactivateByCode` 上——此时它们的 `MAX(version)` 都已算完、都认为是 2，插入必然撞。等于把毫秒级窗口放成秒级，与单测里用 `CountDownLatch` 撑开线程竞态是同一个手法。
+9. **验收脚本自己没打扫**：`llm_call_log` 上一轮的行还在（`trace_id` 相同），"一次调用 = 恰好 1 行"数到 2，看上去像记账重复。凡是"计数类断言"，脚本开头必须先清自己的数据。
+
+### 验证
+
+- **单测 32 条全绿**（`mvn test`）：坏 JSON 4 类 + "完整 JSON 不被误伤" + 值里含 `}` + schema 路径 `[0].priority` + 对象解包；渲染器缺变量列全 / 值不二次展开 / `$` 与 `\` 转义；1406→`40004`、1062→`40902`（三种 `conflictOn`）、1452→`50000` 双向断言；`LlmException` 五个码各自映射 + `retryable` + 文案兜底。
+- **端到端 41 条全绿**（mock，8097）：4 个模板 seed 且都生效、试跑 `provider=mock` + `schemaValid`、缺变量列出全部 3 个、四类坏输出 `repaired=true`、截断只保留完整元素、schema 错误带 `[1].category`、**一次调用恰好 1 行台账**、上游异常也落 1 行且 `E_LLM_UPSTREAM`、3 次重试 `attempt_no=1/2/3` 不覆盖、并发新建同版本 `[0, 40902]`、幂等 seed 4 行无重复。
+- **缺 Key 分支 8 条全绿**（`openai-compatible` + 空 `AI_API_KEY`）：`50001`（不是 `50000`）、`retryable=false`、文案点名 `AI_API_KEY`、台账 1 行 `FAILED/E_LLM_UPSTREAM`、`latency_ms<1000`（**没发起网络请求**）。
+- **前端 `tsc --noEmit` 通过**，`/prompts` 路由已注册。
+
+### 下一步
+
+- T05：抽点与用例生成（`testpoint` / `generation` 两个模块），提示词模板与记账装饰器直接复用 `PromptTemplateService.render()` 与 `loggingLlmProvider.chat()`
+- `docs/01-architecture.md` §2.2 目录树与 §4.2 端点表已同步（D-24 试跑端点、D-25 异常翻译）
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

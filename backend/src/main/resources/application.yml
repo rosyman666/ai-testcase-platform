@@ -1,0 +1,159 @@
+# =============================================================================
+# 公共配置（不含任何密钥明文）
+#   · 所有外部依赖（数据库、模型网关）一律写成 ${ENV:默认值} 占位符
+#   · 密钥与连接口令只从 .env / 环境变量注入，绝不写进本文件
+# =============================================================================
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  tomcat:
+    threads:
+      max: 200
+    max-http-form-post-size: 25MB
+
+spring:
+  application:
+    name: ai-testcase-platform
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  # 从仓库根目录的 .env 加载本地凭据：支持从 backend/ 或仓库根两种方式启动
+  # [.properties] 扩展名提示声明 .env 按 properties 格式解析（KEY=VALUE + # 注释）
+  config:
+    import:
+      - optional:file:./.env[.properties]
+      - optional:file:../.env[.properties]
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:ai_testcase}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&zeroDateTimeBehavior=convertToNull"
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    hikari:
+      pool-name: AiTestHikariPool
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 10000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+    encoding: UTF-8
+    table: flyway_schema_history
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 20MB
+      max-request-size: 25MB
+  jackson:
+    # 时间统一 ISO-8601 UTC（Long → String 见 com.aittest.config.JacksonConfig）
+    time-zone: UTC
+    default-property-inclusion: always
+    serialization:
+      write-dates-as-timestamps: false
+      fail-on-empty-beans: false
+    deserialization:
+      fail-on-unknown-properties: false
+  mvc:
+    # 未匹配到 handler 时抛 NoHandlerFoundException，交由 T02 的 GlobalExceptionHandler 统一映射为 40401
+    throw-exception-if-no-handler-found: true
+
+# ---------------------------------------------------------------------------
+# MyBatis-Plus：分页、乐观锁、逻辑删除、字段自动填充在 T02 的 MybatisPlusConfig 中注册
+# ---------------------------------------------------------------------------
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.aittest
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+    default-statement-timeout: 30
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_id
+      table-underline: true
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# ---------------------------------------------------------------------------
+# 模型接入（mock 默认可用、离线可跑；密钥只在 .env / 环境变量中）
+# ---------------------------------------------------------------------------
+ai:
+  provider: ${AI_PROVIDER:mock}
+  base-url: ${AI_BASE_URL:}
+  api-key: ${AI_API_KEY:}
+  model: ${AI_MODEL:mock-model}
+  timeout-seconds: ${AI_TIMEOUT_SECONDS:60}
+  max-retry: 3
+  temperature:
+    testpoint: ${AI_TEMPERATURE_TESTPOINT:0.2}
+    generate: ${AI_TEMPERATURE_GENERATE:0.4}
+    repair: ${AI_TEMPERATURE_REPAIR:0.0}
+  fallback:
+    # 见架构文档 §8.7：禁止真实 provider 失败后自动降级到 mock（会污染评估数据）
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# 接口文档
+# ---------------------------------------------------------------------------
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: method
+    display-request-duration: true
+  default-produces-media-type: application/json
+
+# ---------------------------------------------------------------------------
+# 可观测
+# ---------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,flyway
+  endpoint:
+    health:
+      show-details: never
+  health:
+    db:
+      enabled: true
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    version: 1.0.0
+
+# ---------------------------------------------------------------------------
+# 日志：控制台 + logs/ 文件（logs/ 已被 .gitignore 忽略）
+# ---------------------------------------------------------------------------
+logging:
+  level:
+    root: INFO
+    com.aittest: INFO
+    org.springframework.web: INFO
+    com.baomidou: INFO
+  file:
+    name: logs/ai-testcase.log
+  logback:
+    rollingpolicy:
+      max-file-size: 20MB
+      max-history: 7
+      total-size-cap: 200MB
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId:-}] %logger{40} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId:-}] %logger{40} - %msg%n"

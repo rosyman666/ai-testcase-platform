@@ -1,0 +1,58 @@
+/* ==========================================================================
+   Tailwind 三件套
+   注意：tailwind.config.js 里已设置 corePlugins.preflight = false，
+   因此这里的 @tailwind base 只输出 CSS 变量（如 --tw-ring-offset-*），
+   不会重置 html/body/button——样式重置的唯一来源是 MUI 的 CssBaseline。
+   ========================================================================== */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   全局变量与最小安全兜底
+   （preflight 关闭后浏览器默认 body margin 为 8px，这里显式归零）
+   ========================================================================== */
+:root {
+  --app-header-height: 56px;
+  --app-sider-width: 220px;
+  --app-content-bg: #f6f8fb;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background-color: var(--app-content-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条统一（表格页很常用，默认滚动条在 Windows 上过宽） */
+* {
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(15, 23, 42, 0.18);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+/* 长文本（提示词、用例步骤、堆栈）换行保留格式 */
+.pre-wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}

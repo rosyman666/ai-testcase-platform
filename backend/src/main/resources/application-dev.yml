@@ -1,0 +1,39 @@
+# =============================================================================
+# 本地开发 profile：本机 MySQL + 详细日志 + flyway 明细
+# 启动方式：cd backend && mvn spring-boot:run （默认 profile 即 dev）
+# =============================================================================
+spring:
+  flyway:
+    # 开发期允许自动清库重建（仅当显式传 -Dspring.flyway.clean-disabled=false 时才会生效）
+    clean-disabled: true
+    clean-on-validation-error: false
+    out-of-order: false
+
+mybatis-plus:
+  configuration:
+    # 开发期打印 SQL，便于排查 Flyway 建表与映射不一致
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,flyway,env,beans
+  endpoint:
+    health:
+      show-details: always
+
+springdoc:
+  swagger-ui:
+    try-it-out-enabled: true
+
+logging:
+  level:
+    com.aittest: DEBUG
+    com.baomidou.mybatisplus: DEBUG
+    org.flywaydb: INFO
+    # 数据源与连接池的 DEBUG 日志噪音太大，显式压回 INFO
+    com.zaxxer.hikari: INFO
+
+ai:
+  provider: ${AI_PROVIDER:mock}

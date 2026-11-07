@@ -1573,6 +1573,8 @@ spring:
 
 **要求**：`*_DIR` 类配置在**绑定的 setter 里**做 `isBlank()` 回落默认值 + `trim()`，不要在调用点散着判空；并在回落时打一行 DEBUG/INFO（"STORAGE_DIR 为空，回落 uploads"），否则"为什么落到工作目录"永远查不出来。**判据**：`.env` 写 `STORAGE_DIR=` 启动后，首个上传的落盘日志仍应显示 `…/uploads/docs/<日期>/`，而不是 `…/docs/<日期>/`。
 
+> **⚠️ 实现状态：未落实（截至 T03 `1a44cd8`）。** 本条是**事后新增的要求**，T03 交付的 `StorageProperties` 只有 `private String dir = "uploads";` + Lombok `@Setter`，**没有** `isBlank()` 回落。端到端实测：`STORAGE_DIR= java -jar …` 后上传 → `code=0`、`PARSED`、入库正常，日志 `[DOC-STORAGE] 原始文件目录已就绪 dir=…\backend\docs\20261107`（期望 `…\backend\uploads\docs\20261107`）。**这条不修，读取本文的人会以为防住了。** 修复补丁待批，记录见 **§11.1 D-21**。
+
 **`AI_MODEL` 的缺省值必须是 `mock-model`，不能是空串**——`V2__dict_and_config.sql` 的 `model_price` 种子行里 mock 的 `model` 正是 `mock-model`（单价 0/0）。若缺省为空串，`llm_call_log.model = ''` 与 `model_price.model` 关联不上 → 成本归集查不到单价，mock 演示的成本恒为 0 且**看不出是"算对了"还是"没算"**。这属于"明确非敏感值"，不违反下面"禁止默认密码/Key"的硬约束。
 
 **`SERVER_PORT` 的特殊坑**：Spring 宽松绑定会把它直接映射成 `server.port`，且**环境变量优先级高于 `application.yml`**。本机沙箱注入 `SERVER__PORT=59173` 时应用会抢 59173 启动、vite proxy 打 8080 全部 404——这就是 §11.1 **D-07** 加 `spring-boot:run` 端口锁的直接原因。换端口请用 `SERVER_PORT=9090`（认这个）或 `mvn spring-boot:run -Dapp.port=9090`（绕过环境变量），不要两处混填。
@@ -1643,7 +1645,7 @@ spring:
 | 是否引入了 PRD 之外的功能 | ✅ 未引入；仅新增 `system/dict` 只读接口（服务前端枚举，属必要基础设施） |
 | 是否引入 Redis/MQ/外部中间件 | ✅ 无。队列=MySQL 表，推送=SSE，缓存=进程内 |
 | 指标口径是否可被 SQL 直接验证 | ✅ §8.3 全部为 `count`/`sum` 表达式，无模糊表述 |
-| 实施偏差是否留档 | ✅ §11 逐项记录 **20 条**偏差（D-01~D-20：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、2 个文档表格与配置漂移、1 个时区配置不足、1 个运行期可选依赖、1 个枚举单一真源收敛、1 个字典归属调整、1 个时间列默认值方案定稿并修正前条错误结论、1 个业务单号分配机制由「撞库兜底」改为「播种+重试」、1 个测试环境方言差异（H2 不可替代真实 MySQL 的场景）、1 个落盘目录从 tmpdir 改为可配置持久目录、1 个运行时产物目录与 `.gitignore` 的联动规则） |
+| 实施偏差是否留档 | ✅ §11 逐项记录 **21 条**偏差（D-01~D-21：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、2 个文档表格与配置漂移、1 个时区配置不足、1 个运行期可选依赖、1 个枚举单一真源收敛、1 个字典归属调整、1 个时间列默认值方案定稿并修正前条错误结论、1 个业务单号分配机制由「撞库兜底」改为「播种+重试」、1 个测试环境方言差异（H2 不可替代真实 MySQL 的场景）、1 个落盘目录从 tmpdir 改为可配置持久目录、1 个运行时产物目录与 `.gitignore` 的联动规则、**1 个「文档已要求、实现未落实」的开放项（D-21，未闭合）**）。**D-21 的存在方式与前 20 条不同**：它是唯一一条**登记时就不成立**的记录——留着是因为"文档写 A、代码是 B"正是本节要仲裁的情形，不登记就等于默许文档说谎 |
 | 验收条目的隐性依赖是否显式登记 | ✅ §12 登记 **37 条**依赖（约束 10 / 口径 11 / 前置条件 16）。其中 **16 条属「前置条件」类**——依赖不成立时条目不会红、只会测到别的东西（如断言 `created_at` 测的是 JVM 时钟而非会话时区、并发测试迁到 H2 得到假绿灯）。这类条目是本章最需要留痕的部分，因为失败方式是"静默通过"而不是"失败" |
 
 ---
@@ -1681,6 +1683,8 @@ spring:
 | **D-19** | `application.yml` → `storage.dir`<br/>新增 `config/StorageProperties.java`<br/>同步 §8.8 ②、§2.2、§6 T03 | 设计只写到「落盘」这一步（§5.1 流程图有、`doc_source.storage_path` 有字段），**从未指定落盘根目录**；T03 初版实现落在 `java.io.tmpdir` | 新增 `config/StorageProperties`（`@ConfigurationProperties(prefix = "storage")`），`application.yml` 写 `storage.dir: ${STORAGE_DIR:uploads}`，`.env.example` 登记 `STORAGE_DIR=uploads`；实际按 `uploads/docs/yyyyMMdd/uuid.ext` 分层 | **`java.io.tmpdir` 会被系统清理**：Linux 的 `systemd-tmpfiles` 默认清理 `/tmp` 下长期未访问的文件，Windows 亦有清理策略。而 `doc_source.storage_path` 的语义是「原始文件可回溯、重解析不必让用户重传」（见 D-02）——放在 tmp 下演示没问题，但**只要机器重启或清理任务跑过一次，重解析就永久失败**，且现象是「文件不存在」，会被当成代码 bug 查很久。改成可配置持久目录 + 绝对路径归一化后，这个失败模式整个消失 | 重解析链路（`DocService.reparse()`）依赖它；T14 的 `reset-db.sh` 需明确「清库不清文件」还是两者都清。**`STORAGE_DIR` 是相对路径**（解析基准＝后端进程工作目录），踩坑说明见 §8.8「相对路径配置项的坑」 |
 | **D-20** | `.gitignore` → 运行时产物目录<br/>同步 §8.8 ③④ | 设计**未规定**「写盘类配置项」与 `.gitignore` 的联动 | 运行时区原有 `data/` `uploads/` `logs/`，**缺 `exports/`**（`EXPORT_TEMP_DIR` 的默认值）。本批补上 `exports/` 与两行注释，并在 §8.8 ③ 增第 ④ 步：**写盘类配置项（`*_DIR`）必须在同一个 commit 里把产物目录加进 `.gitignore`** | 缺 `exports/` 时导出功能**完全正常**——失败只发生在「有人执行 `git add .`」那一刻，而那次提交的信息通常与导出无关，review 时根本看不出 zip 是被谁带进来的；一旦入库，此后每次导出都产生 diff。**这是典型的「零测试可发现」缺陷**，只能靠规则 + 判据（跑完上传与导出后 `git status --short` 只应显示源码改动）来兜 | 已实测 `git check-ignore -v backend/exports/x.zip` → `.gitignore:39:exports/`。**顺带查出同类缺口**：`.env.example` 有 `STORAGE_DIR` 但**没有 `EXPORT_TEMP_DIR`**（§8.8 ③ 第 ① 步漏一半），已转 T09。→ 已回改 §8.8 ③（三步→四步）与硬约束 |
 
+| **D-21** | `config/StorageProperties.java` → `dir` 的空值兜底<br/>同步 §8.8 ① 第③条、§12 | §8.8 ① 原先只有两条要求（路径归一化 + 打印实际绝对路径），**未要求「配置值为空串时回落默认值」** | **文档已要求、实现未落实（开放项，未闭合）**：`StorageProperties` 只有 `private String dir = "uploads";` + Lombok `@Setter`，无 `isBlank()` 回落。`STORAGE_DIR=`（有键无值）时 Spring 绑出**空串** → `dir=""` → `Path.of("").toAbsolutePath().normalize()` = **工作目录本身**，文件落到 `backend/docs/…`。修法（待批）：`setDir` 里 `isBlank() ? "uploads" : dir.trim()` | **端到端实测（T03 `1a44cd8` 之后）**：`STORAGE_DIR= java -jar …` 上传 `demo.md` → `code=0`、`PARSED`、入库正常，日志 `[DOC-STORAGE] 原始文件目录已就绪 dir=…\backend\docs\20261107`（期望 `…\backend\uploads\docs\20261107`）。**上传/解析/列表全绿，只有重解析会 404**，而现场信息是「文件不存在」，会被当成代码 bug 查。另：纯空白串抛 `InvalidPathException`——它**不是** `IOException` 子类，落到兜底就是 `50000` | **未闭合**。修好后按 §11.3 第 5 条在「影响范围」追加「已于 X 修复」，并决定并入 D-19 还是保留独立编号。**一条命令验证**：`grep -c isBlank backend/src/main/java/com/aittest/config/StorageProperties.java` 现为 **0**，修复后应为 **1** |
+
 **D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 **22** 个键一个不漏）：
 ```bash
 # 必须先滤掉注释行，否则会多出一个 ENV——
@@ -1711,6 +1715,7 @@ grep -v '^\s*#' backend/src/main/resources/application.yml \
 ### 11.3 追加本节的纪律
 
 1. 只在**任务验收通过后**追加，不预先写"计划中的偏差"。
+   **唯一例外——「开放项」**：当**文档新增或收紧了要求、而已交付的实现未满足**时，必须**立即**登记，并在「影响范围」首词标 **未闭合**（D-21 即此例）。理由：这不是"计划中的偏差"，而是**已实测的不一致**；而文档一旦写下要求却不登记，"文档写 A、代码是 B"就没人仲裁了——按本节开头那句话，读者会「以文档为准并视为 bug」，也就是**读到一条读起来像已满足的要求**，比不写更危险。开放项修好后照第 5 条追加"已于 X 修复"，编号不回收。
 2. 每条必须能被一条命令验证（`grep` 表名/字段名/版本号即可），不写无法验证的模糊描述。
 3. 「原因」必须回答"如果不这么做会怎样"，而不是复述"做了什么"。
 4. 偏差若推翻了原设计的**结论**（而不只是细节），要同时回改对应章节正文，并在本节标注 `→ 已回改 §x.y`。
@@ -1740,7 +1745,7 @@ grep -v '^\s*#' backend/src/main/resources/application.yml \
 | T03 | ⑤ 同 `file_hash` 命中缓存返回 `reused:true` | §3.2.2 ①（`file_hash <> ''`） | 约束 | 去掉 `<> ''` 后空 hash 行互相命中，恢复逻辑把 A 的内容覆盖到 B 上**且不报错**；条目本身仍绿 |
 | T03 | ⑦ 软删后重传：`docId`/`doc_no` 不变、子表覆盖不追加 | §3.2.2 与 §4.2.1 四态去重矩阵 | 口径 | 若把 `PENDING` 纳入"可重复解析"，两个并发请求会互相删掉对方的子行；本条不覆盖 `PENDING`，靠 §4.2.1 的矩阵约束 |
 | T03 | ⑧ 会话时区由 DB 侧自证（禁断言 `created_at`） | §3.2.1.1 两个时间来源、§11.1 D-16 | 前置条件 | **这是本节存在的典型理由**：改成断言 `created_at` 后，会话漂成 `+08` 依然绿（因为 `created_at` 由 JVM 时钟写入），护栏名存实亡 |
-| T03 | 上传落盘到 `storage.dir`（`STORAGE_DIR`） | §8.8 ① 第 ③ 条（`*_DIR` 必须自身兜空） | 前置条件 | `.env` 写成 `STORAGE_DIR=` 时 Spring 绑出**空串**、**不**回落到 `:uploads`，`Path.of("")` 等于工作目录**且不抛异常**，文件静默落到 `backend/docs/…`；纯空白串则抛 `InvalidPathException`（**不是** `IOException`）→ `50000`。上传与解析全程成功，**没有任何条目会红** |
+| T03 | 上传落盘到 `storage.dir`（`STORAGE_DIR`） | §8.8 ① 第 ③ 条、§11.1 D-21（**当前未落实**） | 前置条件 | `.env` 写成 `STORAGE_DIR=` 时 Spring 绑出**空串**、**不**回落到 `:uploads`，`Path.of("")` 等于工作目录**且不抛异常**，文件静默落到 `backend/docs/…`；纯空白串则抛 `InvalidPathException`（**不是** `IOException`）→ `50000`。上传与解析全程成功，**没有任何条目会红** |
 | T03 | 重解析直接读磁盘原始文件（不要求用户重传） | §11.1 D-19（`storage.dir` 持久落盘目录） | 前置条件 | 落在 `java.io.tmpdir` 时，机器重启或系统清理任务跑过一次后重解析**永久失败**，现象是「文件不存在」——会被当成代码 bug 查很久，而上传与首次解析**全程正常**，没有任何条目会红 |
 | T03 | ⑨ `TimezoneGuard` 启动自检 | §3.2.1.1 两条护栏、T14 ⑧（日志级别） | 前置条件 | 日志级别被调到 `error` 后 WARN 被吞，"有时区自检"退化为"有个类叫 TimezoneGuard"，且**没有任何条目会红** |
 | T04 | ② `api_key` 支持 `${ENV}` 占位、代码零写死 | §8.8 ② 键名 ↔ 占位符对照表 | 前置条件 | 新增配置项忘记登记对照表 → 缺省值静默生效（如 `AI_MODEL` 空串），`llm_call_log.model` 与 `model_price.model` 关联不上，**成本恒为 0 且分不清"算对了"还是"没算"** |

@@ -27,6 +27,14 @@ public enum ErrorCode {
     /** 无可导出/可操作数据。 */
     E_EMPTY_RESULT(40003, "没有可处理的数据", HttpStatus.OK),
 
+    /**
+     * 字段内容超长（DB {@code 1406 Data too long} 的应用侧映射，见 §8.1 / §8.1.1）。
+     *
+     * <p>它存在的前提是 {@code sql_mode} 含 {@code STRICT_TRANS_TABLES}：没有 strict 模式时
+     * MySQL 会**静默截断并返回成功**，这条错误永远不会被触发，而脏数据已经进库了。</p>
+     */
+    E_FIELD_TOO_LONG(40004, "字段内容超出长度限制", HttpStatus.OK),
+
     /** 未登录 / token 缺失。 */
     E_UNAUTHORIZED(40101, "登录已失效，请重新登录", HttpStatus.UNAUTHORIZED),
 
@@ -41,6 +49,14 @@ public enum ErrorCode {
 
     /** 状态机拒绝（如对 SUCCESS 任务 cancel）。 */
     E_STATE_ILLEGAL(40901, "当前状态不允许该操作", HttpStatus.OK),
+
+    /**
+     * 唯一键冲突（DB {@code 1062 Duplicate entry} 的应用侧映射，见 §8.1）。
+     *
+     * <p>{@code data.conflictOn} 只给**冲突类型**（{@code doc_no} / {@code file_hash} / {@code other}），
+     * 不返回键值本身——键值里往往含用户数据，且回显它等于把唯一索引结构告诉调用方。</p>
+     */
+    E_DUPLICATE(40902, "数据已存在，请勿重复提交", HttpStatus.OK),
 
     /** 文档解析失败。 */
     E_DOC_PARSE_FAILED(42001, "文档解析失败", HttpStatus.OK),

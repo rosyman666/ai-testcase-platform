@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  模型调用台账的写入语句（只追加，无 update/delete）。
+
+  ## 为什么不用 BaseMapper.insert
+  1. **列名写死，写入面收敛**：MP 的 insert 按"实体非空字段"动态拼列。一旦有人把全局
+     `mybatis-plus.global-config.db-config.insert-strategy` 改成 IGNORED（为了别的表方便），
+     这里就会开始显式写 `created_at = NULL`，而该列是 `NOT NULL DEFAULT CURRENT_TIMESTAMP(3)`
+     → 记账**全部失败**。而记账失败是"静默"的（只打一条 error 日志，业务照跑），
+     等到对账发现成本是 0，已经过去几天了。
+  2. **created_at 交给数据库**：§8.2 规定"写库用 CURRENT_TIMESTAMP（与会话同源）"，
+     应用侧填 LocalDateTime 会变成"JVM 时钟 + 会话默认值"两个来源。
+     会话时区已由 JDBC 的 forceConnectionTimeZoneToSession=true 钉在 +00:00（§3.2.1.1），
+     所以这里不写这一列就是 UTC，且只有**一个**来源。
+
+  ## 为什么 id 由调用方传入
+  本语句不走 MP 的雪花填充（那是 BaseMapper.insert 的逻辑）。调用方用
+  `IdentifierGenerator.nextId(...)` 生成，与全项目其余主键同一套算法，不另造 ID 规则。
+-->
+<mapper namespace="com.aittest.aicore.log.LlmCallLogMapper">
+
+    <insert id="append" parameterType="com.aittest.aicore.log.LlmCallLog">
+        INSERT INTO llm_call_log (id,
+                                  task_id,
+                                  task_item_id,
+                                  trace_id,
+                                  scene,
+                                  provider,
+                                  model,
+                                  prompt_tokens,
+                                  completion_tokens,
+                                  cost_micro,
+                                  latency_ms,
+                                  attempt_no,
+                                  status,
+                                  error_code,
+                                  degraded)
+        VALUES (#{log.id},
+                #{log.taskId,jdbcType=BIGINT},
+                #{log.taskItemId,jdbcType=BIGINT},
+                #{log.traceId},
+                #{log.scene},
+                #{log.provider},
+                #{log.model},
+                #{log.promptTokens},
+                #{log.completionTokens},
+                #{log.costMicro},
+                #{log.latencyMs},
+                #{log.attemptNo},
+                #{log.status},
+                #{log.errorCode},
+                #{log.degraded})
+    </insert>
+
+</mapper>

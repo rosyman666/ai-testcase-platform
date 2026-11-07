@@ -19,6 +19,8 @@ const HomePage = lazy(() => import('@/pages/Home'));
 // T03：文档模块（只新增，不改动已有路由）
 const DocListPage = lazy(() => import('@/pages/docs/DocList'));
 const DocDetailPage = lazy(() => import('@/pages/docs/DocDetail'));
+// T04：提示词模板（列表 / 详情 / 试跑三合一，不单独开详情路由）
+const PromptTemplateListPage = lazy(() => import('@/pages/prompts/PromptTemplateList'));
 
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
@@ -89,6 +91,16 @@ export const router = createBrowserRouter([
         element: (
           <PageBoundary>
             <DocDetailPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T04 提示词模板：列表 + 详情弹窗 + 试跑。详情走弹窗不走独立路由，
+        // 因为"看着列表改模板、改完立刻试跑"是一个连续动作，跳页会打断对比
+        path: '/prompts',
+        element: (
+          <PageBoundary>
+            <PromptTemplateListPage />
           </PageBoundary>
         ),
       },

@@ -133,6 +133,23 @@ export default function Home(): JSX.Element {
 
         <Paper elevation={0} className="mt-6 p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h5" component="h2" className="mb-2">
+            业务入口
+          </Typography>
+          <Typography variant="body2" color="text.secondary" className="mb-3">
+            控制台（T12）做好之前，先用这里的入口进各模块，免得每次手敲地址。
+          </Typography>
+          <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+            <Button variant="outlined" size="small" onClick={() => navigate('/docs')}>
+              需求文档（T03）
+            </Button>
+            <Button variant="outlined" size="small" onClick={() => navigate('/prompts')}>
+              提示词模板（T04）
+            </Button>
+          </Stack>
+        </Paper>
+
+        <Paper elevation={0} className="mt-6 p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="h5" component="h2" className="mb-2">
             下一步
           </Typography>
           <Typography variant="body2" color="text.secondary">

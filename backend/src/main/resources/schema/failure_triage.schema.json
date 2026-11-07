@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "classpath:schema/failure_triage.schema.json",
+  "title": "失败归因结果",
+  "description": "归因返回的是【单个对象】而不是数组（一条执行结果只判一次），所以它和 testpoint/testcase 两个数组 schema 形状不同。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "confidence", "reason"],
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": ["TIMEOUT", "ASSERTION", "ENV", "DEPENDENCY", "DATA", "UNKNOWN"],
+      "description": "必须与 failure_category 字典的 code 一致。"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "置信度；低于 0.6 时调用方转人工，不要一律给 1.0。"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 200,
+      "description": "必须引用失败信息里的原文片段作为依据，而不是复述判定规则。"
+    }
+  }
+}

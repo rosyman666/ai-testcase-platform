@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "classpath:schema/testpoint.schema.json",
+  "title": "测试点抽取结果",
+  "description": "校验的是【数组】本身，而不是外层对象。原因：失败路径要能直接落到 [2].category 这种形状上，长一层 .testpoints 对定位没有帮助（见 T04 ④）。",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 30,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["title", "category", "riskLevel", "description", "sourceRef"],
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 200,
+        "description": "一句话说清测什么。超长会被 40004 拦住，所以上限比列宽（500）更紧。"
+      },
+      "category": {
+        "type": "string",
+        "enum": ["FUNCTIONAL", "BOUNDARY", "EXCEPTION", "SECURITY", "PERFORMANCE", "COMPATIBILITY"],
+        "description": "必须与 common/enums/CaseType 的 code 完全一致；写中文会直接 E_SCHEMA_INVALID。"
+      },
+      "riskLevel": {
+        "type": "string",
+        "enum": ["HIGH", "MEDIUM", "LOW"],
+        "description": "必须与 common/enums/RiskLevel 一致。"
+      },
+      "description": {
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 1000,
+        "description": "测试意图与判定要点（不含具体步骤，步骤在用例生成阶段展开）。"
+      },
+      "sourceRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "description": "来源引用，必须能反查回 api_operation.operation_id 或 doc_section.seq_no（T05 ③）。"
+      }
+    }
+  }
+}

@@ -114,6 +114,53 @@
 
 ---
 
+## 2026-11-07 · 阶段 3 · T01 工程骨架与基础设施
+
+### 做了什么
+
+1. **后端骨架**（`backend/`，提交 `e45b51f`）：Spring Boot 3.3.5 + Java 17 + MyBatis-Plus 3.5.9，`com.aittest` 包下建 `common`(ApiResponse) / `config`(JacksonConfig) / `logging`(TraceFilter) / `system`(HealthController) 四个包。
+2. **数据库版本化**：`V1__schema.sql` 建 15 张业务表，`V2__dict_and_config.sql` 建 2 张字典表 + 种子数据，共 17 张；Flyway 记录 `1 schema` / `2 dict and config` 两行，均 `success=1`。
+3. **唯一端到端打通的接口** `GET /api/health`：返回 `{code,data,traceId}`，响应头回写 `X-Trace-Id`，`data` 带 `dbOk` 与当前 provider/model。
+4. **前端骨架**（`frontend/`）：Vite 5 + React 18 + TS + MUI + Tailwind，`/api` 代理到 8080，一个能验证 MUI 与 Tailwind 共存的最小页面。
+5. **双人验收**：工程师自测 8/8 → QA 独立复验 8/8，抓出 1 个 P3（`pom.xml` 注释结论与实测相反，已由 `c605c7e` 修正）。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| Tailwind `preflight: false` | Tailwind 的 preflight 会全局重置 `button`/`input` 默认样式，MUI 的 Button 会变成裸文字。关掉后由 MUI 的 `CssBaseline` 做唯一样式重置来源 | 保留 preflight（MUI 组件全部走样）、或换非组件库（放弃成熟组件生态） |
+| 用 Flyway 而不是 `schema.sql` | `schema.sql` 每次启动重建，无版本、不可增量、无审计；Flyway 的 `flyway_schema_history` 能回答"这台机器现在是第几版" | `spring.sql.init` 自动执行（省事但无法演进） |
+| `.env` 用 `spring.config.import` 加载 | Spring Boot 默认不读 `.env`（那是 Node 习惯）。不加载就只能写死在 yml 或每次手动 export，两者都会导致"换台机器跑不起来" | 环境变量 export（换机器就忘）、把密码写进 yml（必然泄露） |
+| Long 序列化用 `Jackson2ObjectMapperBuilderCustomizer` | 只注册 `Long`/`long` 的 `ToStringSerializer`，保留 Boot 的默认特性；不覆盖整个 `ObjectMapper` Bean | 用 `@JsonSerialize` 逐字段标注（漏一个就是线上事故）、yml 全局转字符串（会把 `int` 也搞坏） |
+| 不加 `@MapperScan`，只给 Mapper 接口打 `@Mapper` | `@MapperScan("com.aittest")` 通配包名会把 `LlmProvider` 这类业务接口误注册成 Mapper，启动期报奇怪的 bean 错误 | 通配扫描（T02 起改用精确 `com.aittest.**.mapper`） |
+| 布尔列用 `TINYINT` 而非 `TINYINT(1)`，实体用 `Integer` | MySQL 8.0.17 起显示宽度对整数类型已废弃；真正的问题是 Connector/J 把 `TINYINT(1)` 优先映射成 `Boolean`、`TINYINT` 映射成 `Integer`，混用会导致 DAO 反序列化出错 | `TINYINT(1)` + 实体 `Boolean`（看起来更语义化，实则埋坑） |
+
+### 踩坑记录
+
+1. **端口被环境变量劫持（最隐蔽）**：本机注入了 `SERVER__PORT=59173`（双下划线）。Spring 的**宽松绑定**会把它归一化成 `server.port`，且**环境变量优先级高于 `application.yml`**，应用去抢 59173 直接启动失败。解法：`pom.xml` 给 `spring-boot-maven-plugin` 加 `-Dserver.port=${app.port}`（系统属性优先级高于环境变量）。
+   ⚠️ 这在 `java -jar` 下**不生效**——打包产物不带该参数，仍会被劫持。我最初在 pom 注释里写"部署产物不受影响"，QA 实测证伪：裸跑 `java -jar` 崩在 59173，必须 `java -Dserver.port=8080 -jar`。
+2. **Flyway 10 把 MySQL 支持拆成了独立模块**：只引 `flyway-core` 会报 `Unsupported Database: MySQL 8.0`，必须同时引 `flyway-mysql`（10.17.0）。
+3. **`eslint-plugin-react-hooks@4.6` 与 `eslint@9` 的 peer 冲突**：4.x 的 peer 范围只到 eslint 8，`npm install` 直接 ERESOLVE 失败，且报错指向 eslint 而非该插件，极难定位。提到 5.x 解决。
+4. **关掉 preflight 后浏览器默认 `body { margin: 8px }` 回来了**：需要在 `index.css` 显式 `margin: 0`，否则页面四周有白边。
+5. **日志文件跨进程累加，直接 grep 会误判**：`logs/ai-testcase.log` 里累积了历史上失败尝试的 ERROR，全文件 grep 会得出"启动就报错"的错误结论。正确做法是按**本次运行的启动时间窗**切日志。
+
+### QA 的验证手法（值得复用）
+
+| 手法 | 解决的问题 |
+|---|---|
+| 建空库 `ai_testcase_qa_verify` 让 Flyway 从零重建，比对两次迁移的 checksum | 排除"表是手工建的 / 复用了旧产物" |
+| 在 `/tmp` 编译探针，用**仓库里真实的** `JacksonConfig` 实测序列化 | 把"读代码觉得对"升级成"实测生效"——`long` 与 `Long` 都变字符串、`int` 保持数字 |
+| 按日志时间窗切片再统计 ERROR | 排除历史日志污染 |
+| 三种探针交叉验证 preflight（`box-sizing` 计数、`text-size-adjust`、utility 选择器数） | 防止单个检查写法差异蒙混过关 |
+| 用 `git log --all -S "sk-..."` 查历史密钥 | 排除"提交后又删掉"的泄漏 |
+
+### 下一步
+
+- T02 通用基础设施与鉴权闭环：`ErrorCode` / `GlobalExceptionHandler` / `PageQuery` / `AuthInterceptor` / `@MapperScan` / 种子账号（`V3__seed_admin_user.sql`）
+- 注意：`ApiResponse`、`JacksonConfig`、`TraceFilter` 已在 T01 交付，T02 **只扩展不重写**
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

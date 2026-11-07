@@ -54,7 +54,7 @@ ai-testcase-platform/
 
 - [x] 选题与可行性评估
 - [x] 系统架构设计与任务分解（14 个任务，关键路径 10 节点）
-- [ ] T01 工程骨架与基础设施
+- [x] T01 工程骨架与基础设施
 - [ ] T02 通用基础设施与鉴权闭环
 - [ ] …（共 14 个任务，见架构文档任务列表）
 
@@ -66,6 +66,26 @@ ai-testcase-platform/
 | Maven | 3.9+ |
 | Node.js | 20+ |
 | MySQL | 8.0+（异步任务依赖 `FOR UPDATE SKIP LOCKED`，5.7 不可用） |
+
+## 快速开始
+
+```bash
+# 1. 建库（只需一次）
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS ai_testcase DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
+
+# 2. 配置：复制模板后填数据库密码；AI_API_KEY 可留空，此时 provider 用 mock 也能跑通全链路
+cp .env.example .env
+
+# 3. 启动后端（Flyway 会自动建 17 张表）
+cd backend && mvn spring-boot:run
+curl http://localhost:8080/api/health        # 期望 {"code":0,...}
+
+# 4. 启动前端（另开一个终端）
+cd frontend && npm install && npm run dev    # http://localhost:5173，/api 已代理到 8080
+```
+
+> **打包产物的启动方式**：`java -Dserver.port=8080 -jar backend/target/ai-testcase-platform.jar`。
+> 必须显式带 `-Dserver.port`——部分沙箱/IDE 会注入 `SERVER__PORT` 环境变量，Spring 的宽松绑定会把它映射成 `server.port` 且优先级高于配置文件，导致端口漂移、前端 proxy 失效。正常部署机无此变量，可用 `SERVER_PORT` 控制。
 
 ## 许可证
 

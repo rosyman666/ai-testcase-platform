@@ -29,9 +29,14 @@ pnpm-debug.log*
 *.key
 
 # ---------- 数据库与运行时数据 ----------
+# 凡由配置项指向的写盘目录，都必须在此登记（见 docs/01-architecture.md §8.8 ③ 第 ④ 步）。
+# 判据：跑一次上传 + 一次导出后 `git status --short` 只应显示源码改动。
 *.sql.bak
 data/
+# STORAGE_DIR 默认值：原始上传文件落盘根目录
 uploads/
+# EXPORT_TEMP_DIR 默认值：JUnit zip 等导出产物
+exports/
 logs/
 
 # ---------- IDE ----------

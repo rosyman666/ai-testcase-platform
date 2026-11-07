@@ -159,6 +159,7 @@ backend/
     │   │   │   ├── PageResult.java                 # 分页出参 {list,total,page,size}
     │   │   │   ├── IdGen.java                      # 雪花 ID + 业务单号生成（T+yyyyMMdd+6位）
     │   │   │   ├── JsonUtils.java                  # 统一 ObjectMapper（UTC、忽略未知字段、Long→String）
+    │   │   │   ├── CodeLabel.java                  # 通用「码+文案」轻量 DTO（code/label），字典接口与所有枚举下拉共用
     │   │   │   └── enums/                          # **全项目枚举唯一真源**（T02 交付）。业务包里禁止另建同义枚举
     │   │   │       ├── CodedEnum.java              # 接口：code() + label() + sortNo()；禁止用 ordinal() 存库
     │   │   │       ├── DocType.java                # MD / TXT / DOCX / OPENAPI_JSON（含扩展名白名单，42002 的唯一判据）
@@ -181,6 +182,8 @@ backend/
     │   │   │   ├── AsyncConfig.java                # 生成线程池 + 调度线程池（有界队列 + 拒绝策略）
     │   │   │   ├── AiProperties.java               # @ConfigurationProperties("ai")：provider 链、超时、重试
     │   │   │   ├── ExportProperties.java           # 导出包名、类名规则、Excel 模板路径
+    │   │   │   ├── StorageProperties.java          # @ConfigurationProperties("storage")：上传落盘根目录（T03 交付，见 §8.8）
+    │   │   │   ├── TimezoneGuard.java              # ApplicationRunner：会话时区非 +00:00 时打 [TZ-GUARD] WARN，不阻断开机（T03）
     │   │   │   └── OpenApiConfig.java              # springdoc 分组与鉴权 scheme
     │   │   ├── auth/
     │   │   │   ├── AuthController.java             # POST /api/auth/login, GET /api/auth/me
@@ -700,31 +703,51 @@ erDiagram
 | 可变业务表（9 张）<br/>`app_user` `doc_source` `test_point` `prompt_template` `gen_task` `gen_task_item` `test_case` `model_price` `execution_run` | ✅ `DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)` | ✅ `DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)` | 由 `MetaObjectHandler` 自动填充，**业务代码禁止手写** |
 | 只追加表（6 张）<br/>`doc_section` `api_operation` `case_review` `llm_call_log` `execution_result` `metric_snapshot` | ✅ 同上 | ❌ **刻意不设** | 写入后语义上不可变；不设 `updated_at` 等于在表结构上承诺"这些行不会被改"，也让误改无处藏身 |
 | 静态字典表（2 张）<br/>`reject_reason` `failure_category` | ❌ 无 | ❌ 无 | 字典随 Flyway 脚本发版，不随时间演化，加时间戳只是噪音 |
-| 所有 `DATETIME(3)` 一律存 **UTC**。**注意 `DEFAULT CURRENT_TIMESTAMP(3)` 取的是「会话时区」时间，光配 `serverTimezone=UTC` 不管用**（它只告诉驱动「怎么解读 DATETIME」，不修改会话 `time_zone`）。必须**两处**同时锁死：① JDBC URL `connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true`（Connector/J 8.0.23+，本项目 8.4.0 满足）→ 强制会话 `time_zone='+00:00'`；② Jackson `spring.jackson.time-zone: UTC`。**DDL 默认值与写库 SQL 不需要、也不应该动**——它们用 `CURRENT_TIMESTAMP(3)` / `NOW(3)`，与会话同源，① 生效即为 UTC（用途分工见 §3.2.1.1）。两者缺一就会出现"DDL 默认值写本地 +08、应用按 UTC 读出"→ 数据看起来在**未来 8 小时**。**定稿（方案 A）：DDL 一律 `DEFAULT CURRENT_TIMESTAMP(3)` + `ON UPDATE CURRENT_TIMESTAMP(3)`，现状 25 处默认值 / 9 处 `ON UPDATE` 一个字都不要改；时区唯一真源是 ① 连接层钉会话 UTC；护栏是 T13 的 `TimezoneIT` 断言 `@@session.time_zone='+00:00'`。** 为什么不改成 `DEFAULT (UTC_TIMESTAMP(3))`：见下方「单轨 vs 双轨」——换了会从"整体平移"退化成"插入与更新各自一套"，问题更难查 | | | |
+| 所有 `DATETIME(3)` 一律存 **UTC**。**注意 `DEFAULT CURRENT_TIMESTAMP(3)` 取的是「会话时区」时间，光配 `serverTimezone=UTC` 不管用**（它只告诉驱动「怎么解读 DATETIME」，不修改会话 `time_zone`）。必须**两处**同时锁死：① JDBC URL `connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true`（Connector/J 8.0.23+，本项目 8.4.0 满足）→ 强制会话 `time_zone='+00:00'`；② Jackson `spring.jackson.time-zone: UTC`。**DDL 默认值与写库 SQL 不需要、也不应该动**——它们用 `CURRENT_TIMESTAMP(3)` / `NOW(3)`，与会话同源，① 生效即为 UTC（用途分工见 §3.2.1.1）。两者缺一就会出现"DDL 默认值写本地 +08、应用按 UTC 读出"→ 数据看起来在**未来 8 小时**。**定稿（方案 A）：DDL 一律 `DEFAULT CURRENT_TIMESTAMP(3)` + `ON UPDATE CURRENT_TIMESTAMP(3)`，现状 25 处默认值 / 9 处 `ON UPDATE` 一个字都不要改；但 DDL 只是兜底，真正的护栏是两条——JVM 侧（`AuditMetaObjectHandler` 固定 `ZoneOffset.UTC`）与 DB 侧（连接层钉会话 UTC + `TimezoneIT` 断言），二者互不替代（详见 §3.2.1.1）。** 为什么不改成 `DEFAULT (UTC_TIMESTAMP(3))`：`ON UPDATE` 语法上换不动，只换 DEFAULT 必然变成"插入 UTC / 更新会话"的双轨，问题更难查 | | | |
 
 **为什么这条值得单独记一笔**：MySQL 默认 `@@global.time_zone = SYSTEM`，开发机上是 +08。此时 `NOW(3)` = `11:31`、`UTC_TIMESTAMP(3)` = `03:31`，两者并存**不会报任何错**，只会让 `created_at` 全是"未来时间"。一旦上线到 UTC 机器，同一份代码行为又变了——所以这不是"本地环境问题"，是**口径没锁死**的问题。验证命令：`SELECT @@global.time_zone, @@session.time_zone, NOW(3), UTC_TIMESTAMP(3);`（会话应为 `+00:00`，两个时间应相同）。
 
-#### 3.2.1.1 单轨 vs 双轨：为什么列默认值只能是 `CURRENT_TIMESTAMP(3)`
+#### 3.2.1.1 两个时间来源 + 两条护栏（"单轨"直觉为什么会骗人）
 
-这一节的结论很容易被后人"顺手优化"掉，所以把机制写透。**核心事实：`CURRENT_TIMESTAMP` 取的是【会话】时区，不是"服务端固定的 UTC"。** 因此它有两种命运，完全取决于你用哪种写法：
+**先纠正本节早期版本的一处错误结论**：原来写的是「时区唯一真源 = 连接层钉会话 UTC，DDL 默认值随会话走所以自动正确」。这不完整——**它把 JVM 侧整个漏掉了**。
 
-| 写法 | INSERT 取值 | UPDATE 取值 | 会话时区漂了会怎样 | 能不能被断言抓住 |
-|---|---|---|---|---|
-| **方案 A（采用）**<br/>`DEFAULT CURRENT_TIMESTAMP(3)` + `ON UPDATE CURRENT_TIMESTAMP(3)` | 会话时区 | 会话时区 | **单轨**：两处一起漂，整表一致地错 8 小时 | ✅ **能**。`TimezoneIT` 断言 `@@session.time_zone='+00:00'` + `created_at` 对齐 `UTC_TIMESTAMP(3)`，一漂就红 |
-| **混用（禁止）**<br/>`DEFAULT (UTC_TIMESTAMP(3))` + `ON UPDATE CURRENT_TIMESTAMP(3)` | **UTC**（表达式不受会话影响） | **会话时区** | **双轨**：插入对、更新错，同一行两列差 8 小时 | ❌ **抓不住**。两半各自自洽——`created_at` 断言永远通过，`updated_at` 没人断言 |
+真实模型是**两个独立时间来源**：
 
-**为什么"混用"在语法上还特别容易发生**：`ON UPDATE` 子句**只接受 `CURRENT_TIMESTAMP[(fsp)]`，不接受括号表达式**（实测 MySQL 8.0.45：`ON UPDATE (UTC_TIMESTAMP(3))` 与 `ON UPDATE UTC_TIMESTAMP(3)` 均报 `ERROR 1064` 语法错误）。也就是说 **`ON UPDATE` 这一侧在语言层面就没有"会话无关"的写法**——你无法把 `updated_at` 也改成 UTC 表达式。所以"只换 DEFAULT"不是"更保险"，而是**唯一换得动的一半**，换完必然双轨。
+| 来源 | 覆盖哪些写入 | 生效条件 | 失效后果 |
+|---|---|---|---|
+| **JVM 时钟**（`AuditMetaObjectHandler`，`MybatisPlusConfig` 内） | 走 MyBatis-Plus 的 insert / update —— **绝大多数业务写入** | 填充器里 `LocalDateTime.now(ZoneOffset.UTC)` | 机器 `TZ`、容器 `-Duser.timezone`、或有人写成无 Zone 的 `now()` → **业务数据整体偏** |
+| **DB 会话时区** | ① 迁移脚本省略时间列的 INSERT（如 `V3__seed_admin_user.sql`）② 业务代码里的手写 `UPDATE` ③ 任何手写 SQL / 人工连库 | JDBC `forceConnectionTimeZoneToSession=true` 钉住会话 | 某条连接没钉住 → **只有这些路径偏，业务写入反而正常** |
 
-**由此得到三条硬约束**：
-1. **DDL 侧一律 `DEFAULT CURRENT_TIMESTAMP(3)` + `ON UPDATE CURRENT_TIMESTAMP(3)`**（现状 25 处默认值 / 9 处 `ON UPDATE`，一个字都不改）。9 处 `ON UPDATE` 列在方案 A 下是**安全**的——会话锁 UTC 时它与 `DEFAULT` 同源、同时刻取值，请不要"顺手"把它们也改掉（一改就是语法错误，改不动的那一半还会误导你想去改另一半）。
-2. **时区唯一真源 = 连接层 ①**。DDL 不自证安全，靠 `TimezoneIT`（§6 T13 ⑤）在**应用实际连接上**断言 `@@session.time_zone='+00:00'`，并覆盖连接池重建后的首插。另有 T03 ⑨ 的启动自检 `[TZ-GUARD]` 做第一道告警网，T06 ⑧ 的认领 SQL 用 `UTC_TIMESTAMP(3)` 做比较基准。
-3. **绕过连接池的人工写库不受本方案保护** —— 这是方案 A 唯一没覆盖的缺口，必须靠纪律补。
+**两条护栏互不替代**：连接层钉住了但 JVM 用了本地时区，业务数据照样偏；JVM 对了但手写 SQL 那条连接没钉住，种子数据与手写更新会偏。**必须两条都在。**
+
+**"单轨"直觉为什么会骗人** —— 这句话是本节最该记住的：直觉假设「所有写入都走同一条路」，于是推出「会话漂了两处一起漂、断言一定抓得住」。实际是「MP 走 JVM 时钟、裸 SQL 走会话时区」两条路，**只有两者都对齐 UTC 时才收敛**；一旦会话漂了，只有后一条路漂 —— 这是**混合，不是单轨**。而断言若打在 MP 写的字段上（`created_at`），恰好测的是唯一不受影响的那条，于是"会话漂了它照样绿"。**断言必须打在非 MP 路径产出的值上，或者干脆直接问数据库。**
+
+（本节模型改过三次，每次都是代码/实测推翻纸面推理：① "默认值由服务端求值、连接层管不到"——错；② "DDL 随会话走所以单轨"——不完整；③ 现版本"两个来源 + 两条护栏"。）
+
+**判据只有一个：审计时间永远存 UTC 墙上时间。** 所以问题不是"跟着谁走"，而是"谁写都要写 UTC"：
+
+| 写入路径 | 应该怎么写 |
+|---|---|
+| MP insert / update | 交给 `AuditMetaObjectHandler`（JVM 时钟 UTC），**业务代码禁止手写** |
+| 业务代码里的手写 `UPDATE`（如 §3.2.2 步骤 3） | **必须显式 `updated_at = UTC_TIMESTAMP(3)`** —— 它绕过了填充器，不能依赖会话 |
+| 迁移脚本省略时间列的 INSERT | 依赖 DDL 默认值（Flyway 与业务共用同一 DataSource，会话已钉住） |
+| 人工连库 / 运维脚本 | 见 §3.2.1.2 |
+
+**DDL 侧仍然一个字都不要改**：`DEFAULT CURRENT_TIMESTAMP(3)` + `ON UPDATE CURRENT_TIMESTAMP(3)`（现状 **25 处默认值 / 9 处 `ON UPDATE`**）。为什么不改成 `DEFAULT (UTC_TIMESTAMP(3))` 做"双重保险"——`ON UPDATE` 子句**只接受 `CURRENT_TIMESTAMP[(fsp)]`、不接受括号表达式**（实测 MySQL 8.0.45：`ON UPDATE (UTC_TIMESTAMP(3))` 与 `ON UPDATE UTC_TIMESTAMP(3)` 均 `ERROR 1064`），所以 DEFAULT 是**唯一换得动的一半**，换完就变成"插入 UTC / 更新会话"的双轨，比不改更糟。**9 处 `ON UPDATE` 列在会话已钉住的前提下是安全的，不要动。**
 
 #### 3.2.1.2 缺口：绕过连接池的人工写库
 
 方案 A 的前提是"写库的连接都来自我们的池"。**mysql CLI / Navicat / 运维脚本 / 数据修复 SQL 默认会话是 `SYSTEM(+08)`**，此时任何 `UPDATE` 都会让 `updated_at` 的 `ON UPDATE CURRENT_TIMESTAMP(3)` 写进**本地时间**，与表里其余行差整 8 小时。
 
-这不是理论风险：D-16 复现时用的就是默认 CLI 会话（`@@session.time_zone=SYSTEM`），`DEFAULT CURRENT_TIMESTAMP(3)` 那一列写出来是 `11:41` 而不是 `03:41`。**而 T13 ⑤ 测不出来**——它断言的是应用连接，人工连接绕过它。
+**这不是理论风险，T03 实施时已经踩到并留下了数据**：工程师用默认 CLI 会话（`@@session.time_zone=SYSTEM`）执行了一句业务 `UPDATE doc_source SET file_hash='' ...`，结果是**同一行内 `created_at` 与 `updated_at` 差整 8 小时**：
+
+```
+doc_no             created_at            updated_at
+D20261107-000009   2026-11-07 04:21:47   2026-11-07 12:23:03
+D20261107-000008   2026-11-07 04:21:47   2026-11-07 12:23:03
+```
+
+`created_at` 是应用写的 UTC（04:21），`updated_at` 被 `ON UPDATE CURRENT_TIMESTAMP(3)` 按手工会话时区写成 +08（12:23）。**一行之内两个时间戳不同源** —— 这比"整表偏 8 小时"更难查，因为 `created_at` 看起来是对的。**而 T13 ⑤ 测不出来**：它断言的是应用连接，人工连接绕过它。
 
 | 规范 | 做法 |
 |---|---|
@@ -735,13 +758,14 @@ erDiagram
 
 **为什么不在应用侧"顺手修"**：应用无法替人工连接兜底。唯一能兜的是把"人工连接要设时区"变成运维规范 + 一次可复核的 SQL 自检；把它写成代码只会制造"以为已经免疫"的错觉。
 
-**⚠️ 一个必须区分的用法，别读反了**：本文严禁的是「把 `UTC_TIMESTAMP(3)` 当**列 DEFAULT**」。它在另外两处是**正确且必须保留**的，不要因为上面这段话去删它们：
-- **读 / 比较基准**：T03 验收⑧、T13 验收⑤ 都以 `UTC_TIMESTAMP(3)` 为基准断言，因为它是唯一与会话无关的"真 UTC"，拿 `NOW(3)` 当基准会恒等、断言永真。
-- **排查用的对照值**：`SELECT @@session.time_zone, NOW(3), UTC_TIMESTAMP(3)` 三件套，两者差 8 小时即说明会话没锁住。
+**⚠️ `UTC_TIMESTAMP(3)` 的两个用法，必须区分清楚**：本文严禁的是「把 `UTC_TIMESTAMP(3)` 当**列 DEFAULT**」。它在另外三处**正确且必须用**：
+- **读写手写 SQL 里的显式赋值**：绕过 `AuditMetaObjectHandler` 的 `UPDATE` 必须自己写 UTC（§3.2.2 步骤 3 属于此类）
+- **人工/运维场景**：没有"应用会话"可依赖，只能显式给 UTC
+- **读与断言的基准**：`CURRENT_TIMESTAMP(3)` vs `UTC_TIMESTAMP(3)` 是判断会话是否钉住的唯一手段
 
-**反过来，写库这一侧不要"为了保险"改用 `UTC_TIMESTAMP(3)`**：§3.2.2 步骤 3 的 `SET updated_at = NOW(3)` 在方案 A 下是**对的**（`NOW(3)` 与 `CURRENT_TIMESTAMP(3)` 是同一来源、同属会话时区，与 DDL 默认值同轨），**不要改成 `UTC_TIMESTAMP(3)`**——那正是双轨的起手式：这一处写 UTC、别处走 DEFAULT 写会话，一旦会话漂了就一半对一半错。
+**反过来，MP 管理的写入不要手写时间**：那是 `AuditMetaObjectHandler` 的职责，手写会绕过 `strictInsertFill` 的存在性判断，也会让"只追加表不该有 `updated_at`"这条纪律失效。
 
-一句话记忆：**写库跟着会话走（`CURRENT_TIMESTAMP` / `NOW`），读和断言才用 `UTC_TIMESTAMP`。** 全项目只有"手动灌数据不经过会话"的场合才需要显式 `UTC_TIMESTAMP(3)`。
+一句话记忆：**审计时间的目标值永远是 UTC 墙上时间。谁写都要写 UTC —— MP 交给填充器，手写 SQL 自己写 `UTC_TIMESTAMP(3)`，DDL 默认值只在"会话已钉住"时作兜底。**
 
 #### 3.2.2 软删后同文件重新上传：复用恢复，不新建
 
@@ -879,6 +903,39 @@ stateDiagram-v2
 
 > 上表共 **48 个端点** = 47 个 REST + 1 个 SSE。其中导出类（#35、#36）返回二进制流，`Content-Disposition` 带文件名。
 
+#### 4.2.1 文档上传/重解析的返回形态（含"部分成功"的处理约定）
+
+同一个 `DocController` 里**两种返回形态并存**，这不是不一致，是两种用户意图：
+
+| 端点 | 用户意图 | 前置校验失败（非白名单扩展名等） | 内容拿到了但解析不出来 |
+|---|---|---|---|
+| `POST /api/docs`（#7） | "**保存**这份文档"，解析只是附带 | `code=42002`，**连行都不建**，无 `data` | **`code=0`** + `data.parseStatus=FAILED` + `data.parseError` |
+| `POST /api/docs/{id}/reparse`（#12） | "**再解析一次**"，解析是唯一目的 | — | `code=42001`；若该行已软删，`message` = "文档已删除，请重新上传" |
+
+**判据是 HTTP 语义**：`upload` 的请求目的（接收并落盘建行）已达成，解析失败是**这个资源的状态**，不是请求失败。所以 `42001` 只属于 `reparse`——在那里解析失败确实等于请求失败。**落盘本身失败（磁盘满/权限）→ `50000`，不是 `42001`。**
+
+**查重命中的四态（`reused` 的真实语义）**
+
+| 命中行的状态 | 动作 | `reused` | `docNo` | 返回的 `parseStatus` |
+|---|---|---|---|---|
+| `deleted=1`（任意 parse_status） | 恢复 `deleted=0` + 重新解析 | `true` | **不变** | 新结果 |
+| `deleted=0` + `PARSED` | **秒回**，不解析、不花钱 | `true` | 不变 | `PARSED`（原值） |
+| `deleted=0` + `FAILED` | **原地重新解析** | `true` | 不变 | 新结果 |
+| `deleted=0` + `PENDING` | **不得重复解析**，直接返回当前状态 | `true` | 不变 | `PENDING`（前端轮询或接 SSE） |
+
+> **`reused` 的语义**：它只表达"**没有新建文档行**"，**不表达"没有做事"**。前端不得把 `reused:true` 当成"无需刷新"。
+>
+> **为什么 `PENDING` 必须禁止重复解析**：解析入库是"先删子表再批量插"（§3.2.2 步骤 4），两个解析并发交错会删掉对方刚插的行，而这个损坏要到 T05 抽点时才表现为"少了几条"，极难反查。
+
+**为什么暂不引入 `PARTIAL` 解析状态**
+
+失败时**整篇 `parse_status=FAILED`**，不做"跳过坏接口继续"。代价是部分失败时用户只看到"失败"，不知道哪些章节成功了、要不要重试。**解法不靠新增状态**（`PARTIAL` 此刻没有消费者：T05/T07 与前端都按二态写，加了就是死代码），而是：
+
+- `parse_error` 里放**可读摘要**：如 `章节 3、7 解析失败：接口 path 长度 612 超过 500 上限`，并附机器可读的 `failedSections: [3,7]`
+- 前端提示"3 个章节失败，可单独重试"，而不是一句"解析失败"
+
+> **若将来前端需要"按章节重试"，再引入 `PARTIAL` 并回改本节** —— 那是设计变更，要走评审与 §11 留痕；**不要靠复用 `parse_error` 偷渡半成功语义**（否则三个月后没人知道"`parse_error` 非空但状态是 `PARSED`"是什么意思）。
+
 ### 4.3 SSE 端点详述
 
 ```
@@ -899,6 +956,10 @@ Accept: text/event-stream
 | 已知限制 | `SseEmitterRegistry` 是**进程内** `ConcurrentHashMap`，多实例部署下必须换成 Redis Pub/Sub 或网关广播。本项目单机部署，明确列为已知限制而非缺陷。 |
 
 ### 4.4 实体与 VO 的边界（**任何接口都不得直接返回实体**）
+
+**全项目硬规则**：**所有对外接口一律返回显式 VO，禁用 `@JsonView`。** 不按"这个任务有没有敏感字段"逐任务判断——那条判据依赖人每次重新判断，而**判据的输入会变**（T05 今天没有 `created_by`，加多用户那天就有了，这个变化不会触发任何人回来复审 T05 的接口）。判据要人反复判断，就必然有一次在没人提醒时判错。
+
+**为什么弃 `@JsonView`**：视图归属写在**实体**上，而"该暴露哪些字段"是**接口**的事；序列化结果还取决于调用方有没有传对 view，漏传即全字段直出、**且不报错**。这与 `ApiResponse` 上 `isSuccess()` 那次的失败模式同类——**默认行为就是危险的**。显式 VO + 逐字段赋值写的时候多几行，但泄露是**编译期不可能发生**，不是"运行期大概率不发生"。这是**失败模式的取舍，不是成本取舍**。
 
 这条在 T03 第一次真正暴露：`doc/` 下有 `DocSource` / `DocSection` / `ApiOperation` 三个实体，而 §4.2 里文档列表与详情是两个完全不同的出参要求。规定如下。
 
@@ -1158,18 +1219,26 @@ sequenceDiagram
 |---|---|---|---|---|---|
 | **T01** | **工程骨架与基础设施** | `backend/pom.xml`<br/>`backend/src/main/resources/application.yml`<br/>`backend/src/main/resources/application-dev.yml`<br/>`backend/src/main/java/com/aittest/AiTestApplication.java`<br/>`backend/src/main/java/com/aittest/common/ApiResponse.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/config/JacksonConfig.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/logging/TraceFilter.java`（最小可用版本）<br/>`backend/src/main/java/com/aittest/system/HealthController.java`（最小可用版本）<br/>`backend/src/main/resources/db/migration/V1__schema.sql`<br/>`backend/src/main/resources/db/migration/V2__dict_and_config.sql`<br/>`frontend/package.json`<br/>`frontend/vite.config.ts`、`frontend/tsconfig.json`、`frontend/tsconfig.node.json`<br/>`frontend/tailwind.config.js`、`frontend/postcss.config.js`、`frontend/index.html`、`.env.example`<br/>`frontend/src/main.tsx`、`frontend/src/App.tsx`、`frontend/src/theme.ts`、`frontend/src/index.css`、`frontend/src/vite-env.d.ts`<br/><br/>**上述 4 个「最小可用版本」文件已交付，T02 只扩展不重写** | — | P0 | ① `mvn -q clean package` 成功，`spring-boot:run` 起得来；② Flyway 建出 17 张表（15 业务表 + 2 字典表）+ 索引 + 字典种子；③ `GET /api/health` 返回 `{code:0}`；④ `npm i && npm run dev` 页面打开无控制台报错；⑤ **MUI 与 Tailwind 同时生效**（`preflight:false`，验证 Button 样式未被重置）；⑥ vite dev proxy 到 8080 生效 |
 | **T02** | **通用基础设施与鉴权闭环** | `common/{ApiResponse ★,ErrorCode,BizException,GlobalExceptionHandler,PageQuery,PageResult,IdGen,JsonUtils}.java`<br/>`common/enums/{CodedEnum,DocType,ParseStatus,TestPointStatus,CaseType,RiskLevel,CaseStatus,CasePriority,TaskScene,TaskStatus,ExecutionStatus,TriageSource}.java`（12 个，**全项目唯一枚举真源**，见 §11.1 D-14）<br/>`config/{MybatisPlusConfig,JacksonConfig ★,WebMvcConfig,AuthInterceptor,AsyncConfig,AiProperties,ExportProperties}.java`<br/>`auth/{AuthController,AuthService,TokenService,AuthContext}.java`<br/>`logging/TraceFilter.java ★`<br/>`system/{DictController,ConfigController}.java`<br/>`system/domain/{RejectReason,FailureCategory}.java`<br/>`system/mapper/{RejectReasonMapper,FailureCategoryMapper}.java`<br/>`system/service/{ConfigService,DictService}.java`<br/>`system/dto/PublicConfigVO.java`（字典归属见 §11.1 D-15）<br/>`frontend/src/api/{http.ts,auth.ts}`<br/>`frontend/src/store/authStore.ts`<br/>`frontend/src/pages/Login.tsx`<br/>`frontend/src/routes/index.tsx`（骨架）<br/><br/>**★ = 已由 T01 交付，T02 只扩展不重写（覆盖即违反 §11.3 追加纪律）** | T01 | P0 | ① **上述 3 个 ★ 文件被修改时，必须保留 T01 已有的行为（`X-Trace-Id` 回写、`Long→String`、`{code,message,data,traceId}` 结构），并跑一次 `/api/health` 回归**；② 无 token 访问 `/api/docs` 返回 `40101`；③ 登录后 token 可访问，过期/篡改返回 `40102`；④ 任意异常统一输出 `{code,message,traceId}`，且响应头有 `X-Trace-Id`；⑤ Long 型 ID 在 JSON 里是字符串（断言 `typeof id === 'string'`）；⑥ `PageQuery` 的 `size>100` 自动截断为 100；⑦ 前端 401 自动清 token 跳登录页；⑧ `GET /api/dict/{type}` 与 `GET /api/config/public` 返回全量枚举字典与公开配置，**且这两个端点在鉴权白名单内（未登录可访问——它们是登录页渲染所需，否则登录页拿不到字典会死锁）**；⑨ `common/enums` 的 12 个枚举全部 `implements CodedEnum`，且 `code()` 与 DDL 里 VARCHAR 列的取值一一对应（用 `grep -c` 核对数量） |
-| **T03** | **文档接入与解析** | `doc/controller/DocController.java`<br/>`doc/service/DocService.java`<br/>`doc/service/parser/{DocumentParser,ParserRegistry,MarkdownParser,TxtParser,DocxParser,OpenApiParser}.java`<br/>`doc/domain/{DocSource,DocSection,ApiOperation}.java`（**不含 `DocType`**，直接用 `common.enums.DocType`，见 §11.1 D-14）<br/>`doc/mapper/*.java`<br/>`doc/dto/{DocSourceVO,DocDetailVO,DocSectionVO,ApiOperationVO}.java`（实体与 VO 边界见 §4.4）<br/>`config/TimezoneGuard.java`（验收⑨的启动自检，**`ApplicationRunner` 实现，不是 `@Configuration`**）<br/>`frontend/src/api/doc.ts`、`frontend/src/types/doc.ts`<br/>`frontend/src/pages/docs/{DocList,DocUploadDialog,DocDetail}.tsx`<br/>`frontend/src/routes/index.tsx`（**★ 只扩展**：新增 `/docs`、`/docs/:id` 两条懒加载路由，**不得改动** T02 已有的 `/login`、`/` 与兜底逻辑，见 §2.3）<br/><br/>**范围约束**：验收⑨的 `TimezoneGuard` 只允许 **5~15 行**，**不得新建 `@Configuration` 类**、不得引入 actuator 端点、不得扩成"时区治理模块"、不得为它加配置项 | T02 | P0 | ① 四种格式（md/txt/docx/OpenAPI json）均能上传并解析成功；② OpenAPI 解析出 method/path/summary 且 `$ref` 深度 ≤3 层无死循环；③ 上传非白名单扩展名返回 `42002`（**判据只能来自 `common.enums.DocType` 的扩展名白名单，禁止在 `DocService` 里再写一份 if-else 或另建枚举**）；④ 解析异常时 `parse_status=FAILED` 且 `parse_error` 是可读中文（不是堆栈）；⑤ 同 `file_hash` 重复上传命中缓存并返回 `reused:true`（查重 SQL 必须带 `file_hash <> ''`，见 §3.2.2）；⑥ 前端能展示章节树与接口列表；⑦ **含软删恢复路径的用例**：删除文档 A → 重新上传同一文件 → 断言 `docId` 与 `doc_no` **不变**、`deleted` 回到 0、`doc_section`/`api_operation` 被覆盖而非追加（条数不翻倍）、`doc_source` 表行数不增；⑧ **写入时间必须与 `UTC_TIMESTAMP(3)` 对齐**：`DocService.upload` 落库后立即查该行 `created_at`，与 `SELECT UTC_TIMESTAMP(3)` 之差 < 2 秒（**不是**与 `NOW(3)` 比——`NOW(3)` 取会话时间，两值恒等、断言永真）。T03 是**第一个真正写业务数据**的任务，这条债不能留到 T13 才还；若此处已歪，后续 10 个任务的所有时间字段都会继承同一个 8 小时偏移；⑨ **启动时区自检（告警网，不是修复手段）**：新增 `config/TimezoneGuard.java`，用 **`ApplicationRunner`**（**不用 `@PostConstruct`**——那个阶段 Flyway 未必迁移完、且抛异常会打挂 Spring 上下文，与"只告警不阻断"的要求直接冲突）在**应用自己的 `DataSource`**（**不得 `DriverManager.getConnection` 另开连接**，那断言的是另一条会话、等于没测）上执行 `SELECT @@session.time_zone`；返回值不是 `+00:00` 时打一条**固定关键字可 grep** 的 WARN：`[TZ-GUARD] session.time_zone=<实际值> expected=+00:00 -> 时间字段可能整体偏移，请检查 connectionTimeZone/forceConnectionTimeZoneToSession`，**不抛异常、不阻断开机**。它**不修时区，只保证漂移发生时不会静默**——这条自检的存在意义是把检测点从 T13（倒数第二个任务）提前到 T03（第一个写数据的任务），中间十来个任务若时区歪了，开机日志里就能看见 |
-| **T04** | **模型 Provider 抽象层 + 提示词模板体系 + 调用记账** | `aicore/{LlmProvider,LlmRequest,LlmResponse,LlmMessage,LlmUsage,LlmException}.java`<br/>`aicore/provider/{MockLlmProvider,OpenAiCompatibleProvider,LlmProviderRouter,LoggingLlmProvider}.java`<br/>`aicore/log/{LlmCallLog,LlmCallLogMapper}.java`<br/>`backend/src/main/resources/mapper/LlmCallLogMapper.xml`<br/>`aicore/structured/{StructuredOutputParser,JsonRepairer,JsonSchemaValidator}.java`<br/>`aicore/prompt/{PromptTemplateService,PromptRenderer,PromptTemplateLoader,PromptTemplate}.java`<br/>`backend/src/main/resources/prompts/{testpoint_extract.v1.md,case_generate.v1.md,case_repair.v1.md,failure_triage.v1.md}`<br/>`backend/src/main/resources/schema/{testpoint.schema.json,testcase.schema.json}`<br/>`frontend/src/api/prompt.ts`、`frontend/src/pages/prompts/PromptTemplateList.tsx` | T02 | P0 | ① `ai.provider=mock` 时**无需任何 API Key** 返回结构合法 JSON；② `ai.provider=openai-compatible` 时 base_url/api_key/model 全由配置注入，**代码零写死**，且 api_key 支持 `${ENV}` 占位；③ `StructuredOutputParser` 能处理 4 类坏输出：markdown fence、尾逗号、单引号 key、JSON 被截断到最后一个完整元素；④ schema 不合规抛 `E_SCHEMA_INVALID` 并带字段路径（如 `[2].priority`）；⑤ 启动时 4 个模板幂等 seed 到 `prompt_template`（重复启动不产生重复行）；⑥ 模板支持 `{{var}}` 渲染，缺失变量抛明确异常；⑦ **记账装饰器 `LoggingLlmProvider` 在 `mock` 与 `openai-compatible` 两种实现下，每次调用（含抛异常）都恰好落 1 条 `llm_call_log`**，字段齐全（`trace_id/scene/provider/model/prompt_tokens/completion_tokens/cost_micro/latency_ms/attempt_no/status/degraded`）；⑧ **重试时 `attempt_no` 递增而不是覆盖**（同一 item 的 3 次重试 → 3 行，`attempt_no` = 1/2/3） |
+| **T03** | **文档接入与解析** | `doc/controller/DocController.java`<br/>`doc/service/DocService.java`<br/>`doc/service/parser/{DocumentParser,ParserRegistry,MarkdownParser,TxtParser,DocxParser,OpenApiParser}.java`<br/>`doc/domain/{DocSource,DocSection,ApiOperation}.java`（**不含 `DocType`**，直接用 `common.enums.DocType`，见 §11.1 D-14）<br/>`doc/mapper/*.java`<br/>`doc/dto/{DocSourceVO,DocDetailVO,DocSectionVO,ApiOperationVO}.java`（实体与 VO 边界见 §4.4）<br/>`config/TimezoneGuard.java`（验收⑨的启动自检，**`ApplicationRunner` 实现，不是 `@Configuration`**）<br/>`config/StorageProperties.java`（`@ConfigurationProperties(prefix = "storage")`，承载 §8.8 的 `STORAGE_DIR`；落盘根目录从 `java.io.tmpdir` 改为可配置持久目录——放 tmp 的话重启即丢，重解析功能直接失效）<br/>`frontend/src/api/doc.ts`、`frontend/src/types/doc.ts`<br/>`frontend/src/pages/docs/{DocList,DocUploadDialog,DocDetail}.tsx`<br/>`frontend/src/routes/index.tsx`（**★ 只扩展**：新增 `/docs`、`/docs/:id` 两条懒加载路由，**不得改动** T02 已有的 `/login`、`/` 与兜底逻辑，见 §2.3）<br/><br/>**范围约束**：验收⑨的 `TimezoneGuard` 只允许 **5~15 行**，**不得新建 `@Configuration` 类**、不得引入 actuator 端点、不得扩成"时区治理模块"、不得为它加配置项。**这条约束的适用范围只到 `TimezoneGuard` 为止**——同一次交付里的 `StorageProperties` 不在"不得新建类"之列（它承载的是 `STORAGE_DIR`，与⑨无关），别把两者混成一条 | T02 | P0 | ① 四种格式（md/txt/docx/OpenAPI json）均能上传并解析成功；② OpenAPI 解析出 method/path/summary 且 `$ref` 深度 ≤3 层无死循环；③ 上传非白名单扩展名返回 `42002`（**判据只能来自 `common.enums.DocType` 的扩展名白名单，禁止在 `DocService` 里再写一份 if-else 或另建枚举**）；④ 解析异常时 `parse_status=FAILED` 且 `parse_error` 是可读中文（不是堆栈）；⑤ 同 `file_hash` 重复上传命中缓存并返回 `reused:true`（查重 SQL 必须带 `file_hash <> ''`，见 §3.2.2）；⑥ 前端能展示章节树与接口列表；⑦ **含软删恢复路径的用例**：删除文档 A → 重新上传同一文件 → 断言 `docId` 与 `doc_no` **不变**、`deleted` 回到 0、`doc_section`/`api_operation` 被覆盖而非追加（条数不翻倍）、`doc_source` 表行数不增；⑧ **会话时区必须由数据库侧自证，而不是断言 MP 写的字段**：在**应用实际连接**上执行 `SELECT CURRENT_TIMESTAMP(3), UTC_TIMESTAMP(3), @@session.time_zone`，断言 `@@session.time_zone='+00:00'` 且前两者之差 < 2 秒。**禁止断言表里的 `created_at`** —— 那是 `AuditMetaObjectHandler` 用 JVM 时钟（`LocalDateTime.now(ZoneOffset.UTC)`）写进去的，与会话时区无关，会话漂成 +08 它**照样绿**（见 §3.2.1.1「测错对象」）。T03 是**第一个真正写业务数据**的任务，此债不留到 T13；⑨ **启动时区自检（告警网，不是修复手段）**：新增 `config/TimezoneGuard.java`，用 **`ApplicationRunner`**（**不用 `@PostConstruct`**——那个阶段 Flyway 未必迁移完、且抛异常会打挂 Spring 上下文，与"只告警不阻断"的要求直接冲突）在**应用自己的 `DataSource`**（**不得 `DriverManager.getConnection` 另开连接**，那断言的是另一条会话、等于没测）上执行 `SELECT @@session.time_zone`；返回值不是 `+00:00` 时打一条**固定关键字可 grep** 的 WARN：`[TZ-GUARD] session.time_zone=<实际值> expected=+00:00 -> 时间字段可能整体偏移，请检查 connectionTimeZone/forceConnectionTimeZoneToSession`，**不抛异常、不阻断开机**。它**不修时区，只保证漂移发生时不会静默**——这条自检的存在意义是把检测点从 T13（倒数第二个任务）提前到 T03（第一个写数据的任务），中间十来个任务若时区歪了，开机日志里就能看见 |
+| **T04** | **模型 Provider 抽象层 + 提示词模板体系 + 调用记账** | `aicore/{LlmProvider,LlmRequest,LlmResponse,LlmMessage,LlmUsage,LlmException}.java`<br/>`aicore/provider/{MockLlmProvider,OpenAiCompatibleProvider,LlmProviderRouter,LoggingLlmProvider}.java`<br/>`aicore/log/{LlmCallLog,LlmCallLogMapper}.java`<br/>`backend/src/main/resources/mapper/LlmCallLogMapper.xml`<br/>`aicore/structured/{StructuredOutputParser,JsonRepairer,JsonSchemaValidator}.java`<br/>`aicore/prompt/{PromptTemplateService,PromptRenderer,PromptTemplateLoader,PromptTemplate}.java`<br/>`backend/src/main/resources/prompts/{testpoint_extract.v1.md,case_generate.v1.md,case_repair.v1.md,failure_triage.v1.md}`<br/>`backend/src/main/resources/schema/{testpoint.schema.json,testcase.schema.json}`<br/>`frontend/src/api/prompt.ts`、`frontend/src/pages/prompts/PromptTemplateList.tsx`<br/>`common/{ErrorCode ★,GlobalExceptionHandler ★}.java`<br/><br/>**★ = T02 已交付，本任务只追加不重写**：`ErrorCode` 加两个枚举、`GlobalExceptionHandler` 加一个 `catch` 分支（见验收⑨）。覆盖式重写会丢掉 T02 已有的 `NoHandlerFoundException`/`NoResourceFoundException` 两条分支，而它们**没有任何其它验收项会覆盖** | T02 | P0 | ① `ai.provider=mock` 时**无需任何 API Key** 返回结构合法 JSON；② `ai.provider=openai-compatible` 时 base_url/api_key/model 全由配置注入，**代码零写死**，且 api_key 支持 `${ENV}` 占位；③ `StructuredOutputParser` 能处理 4 类坏输出：markdown fence、尾逗号、单引号 key、JSON 被截断到最后一个完整元素；④ schema 不合规抛 `E_SCHEMA_INVALID` 并带字段路径（如 `[2].priority`）；⑤ 启动时 4 个模板幂等 seed 到 `prompt_template`（重复启动不产生重复行）；⑥ 模板支持 `{{var}}` 渲染，缺失变量抛明确异常；⑦ **记账装饰器 `LoggingLlmProvider` 在 `mock` 与 `openai-compatible` 两种实现下，每次调用（含抛异常）都恰好落 1 条 `llm_call_log`**，字段齐全（`trace_id/scene/provider/model/prompt_tokens/completion_tokens/cost_micro/latency_ms/attempt_no/status/degraded`）；⑧ **重试时 `attempt_no` 递增而不是覆盖**（同一 item 的 3 次重试 → 3 行，`attempt_no` = 1/2/3）；⑨ **把 `1406`/`1062` 从 `50000` 里拆出来**（§8.1 定的契约，本任务落地——**文档目前走在代码前面是刻意的，这一条就是让它不再悬空**）：`common/ErrorCode` 新增 `E_FIELD_TOO_LONG(40004)` 与 `E_DUPLICATE(40902)`；`GlobalExceptionHandler` 新增 `DataIntegrityViolationException` 分支——`1406 Data too long` → `40004`，字段名**白名单化后**回显（比对实体已知字段名，**禁止把 SQL 原文吐给前端**，会泄露表结构）；`1062 Duplicate entry` → `40902`，`data.conflictOn` **只给冲突类型**（`doc_no`/`file_hash`/`other`），**不返回键值本身**；两者都带 `traceId`。**可复现断言**：往 `doc_source.doc_no` 插重复值 → `code=40902` 且 `data.conflictOn='doc_no'`；把 `test_case.title` 写超 500 字符 → `code=40004`，且 `message` 里出现的是 `title` 这一字段名，**不是** `Data too long for column 'title' at row 1`；两条都断言 `code != 50000`；⑩ **`50000` 的信噪比要正反各验一次**：上条是两个"该分流"的场景，再补一个"该兜底"的场景——故意抛 `NullPointerException`，断言 `code == 50000`。只做正向会让人以为"反正都能接住"，只有两边都断言过，才能证明这一步是**分流**而不是把兜底桶换个地方摆 |
 | **T05** | **测试点抽取（结构化上下文切分）** | `testpoint/controller/TestPointController.java`<br/>`testpoint/service/{TestPointService,TestPointExtractService}.java`<br/>`testpoint/domain/TestPoint.java`<br/>（分类与状态复用 `common.enums.{CaseType,TestPointStatus,RiskLevel}`，不另建枚举，见 §11.1 D-14）<br/>`testpoint/dto/TestPointExtractDTO.java`<br/>`testpoint/mapper/TestPointMapper.java`<br/>`frontend/src/pages/testpoints/TestPointReviewPage.tsx`、`frontend/src/api/testpoint.ts`、`frontend/src/types/testpoint.ts` | T03, T04, T06 | P0 | ① OpenAPI 文档**按 operation 逐个调用**（断言调用次数 = operation 数，不是 1 次全量塞）；② 纯文本文档按 section 切分调用；③ 抽出的点 `category` 落在枚举内、`sourceRef` 能反查回 operation/section；④ `content_hash` 去重生效：同一文档抽取两次，测试点数量不翻倍（老点置 SUPERSEDED）；⑤ 单 operation 抽取失败不影响其他（整体仍成功）；⑥ 前端可启停/编辑/手补测试点；⑦ **`POST /api/testpoints/extract` 立即返回 `taskId`，抽取进度可经 SSE 观察**，符合 §9 决策 5（抽点与用例生成共用同一套异步引擎） |
-| **T06** | **异步任务引擎 + SSE 进度推送** | `generation/controller/GenTaskController.java`<br/>`generation/service/{GenTaskService,GenTaskDispatcher,GenTaskWorker,ProgressPublisher,SseEmitterRegistry,TaskStateMachine}.java`<br/>`generation/domain/{GenTask,GenTaskItem}.java`<br/>（状态复用 `common.enums.{TaskStatus,TaskScene}`，不另建 `GenTaskStatus` / `GenTaskItemStatus`，见 §11.1 D-14）<br/>`generation/dto/*.java`、`generation/mapper/*.java`<br/>`backend/src/main/resources/mapper/{GenTaskMapper.xml,GenTaskItemMapper.xml}`<br/>`frontend/src/api/{task.ts,sse.ts}`、`frontend/src/hooks/useTaskStream.ts` | T04 | P0 | ① `POST /api/tasks` **立即**返回 taskId（P95 < 300ms，不阻塞等模型）；② 调度器用 `FOR UPDATE SKIP LOCKED` 认领，**8 个并发线程不重复消费同一 item**（并发测试断言每个 item 的 attempts 只 +1）；③ SSE 首帧推 `snapshot`，之后 `progress`/`item`/`done` 事件齐全；④ 客户端断开后重连能凭快照恢复进度（不依赖内存事件历史）；⑤ `POST /cancel` 后不再认领新 item，任务置 CANCELED；⑥ item 超时置 FAILED 且 `next_run_at` 按退避后移；⑦ 进程重启后 PENDING item 能被继续消费（不丢任务）；⑧ **认领 SQL 的时间基准必须是 `UTC_TIMESTAMP(3)`，禁止 `NOW(3)`**：认领条件写 `next_run_at <= UTC_TIMESTAMP(3)`。`gen_task.next_run_at` 的**默认值本身就取自会话时区**（见 §3.2.1.1），若比较基准也用 `NOW(3)`，则"写"与"读"都跟着会话漂——应用连接钉了 UTC 时碰巧一致，但一旦某人用 CLI 手工排查或连接池配置被改，认领窗口就整体偏移 8 小时，表现为**"任务迟迟不被认领"或"一次性认领过量"，且日志里看不出来**。用 `UTC_TIMESTAMP(3)` 可让比较基准与"执行者是谁"解耦。**这与 T03 ⑧、T13 ⑤ 是同一根因（时间基准与会话时区耦合）的三个不同落点：写入侧（T03）、比较侧（本任务）、验证侧（T13）** |
+| **T06** | **异步任务引擎 + SSE 进度推送** | `generation/controller/GenTaskController.java`<br/>`generation/service/{GenTaskService,GenTaskDispatcher,GenTaskWorker,ProgressPublisher,SseEmitterRegistry,TaskStateMachine}.java`<br/>`generation/domain/{GenTask,GenTaskItem}.java`<br/>（状态复用 `common.enums.{TaskStatus,TaskScene}`，不另建 `GenTaskStatus` / `GenTaskItemStatus`，见 §11.1 D-14）<br/>`generation/dto/*.java`、`generation/mapper/*.java`<br/>`backend/src/main/resources/mapper/{GenTaskMapper.xml,GenTaskItemMapper.xml}`<br/>`frontend/src/api/{task.ts,sse.ts}`、`frontend/src/hooks/useTaskStream.ts` | T04 | P0 | ① `POST /api/tasks` **立即**返回 taskId（P95 < 300ms，不阻塞等模型）；② 调度器用 `FOR UPDATE SKIP LOCKED` 认领，**8 个并发线程不重复消费同一 item**（并发测试断言每个 item 的 attempts 只 +1）；③ SSE 首帧推 `snapshot`，之后 `progress`/`item`/`done` 事件齐全；④ 客户端断开后重连能凭快照恢复进度（不依赖内存事件历史）；⑤ `POST /cancel` 后不再认领新 item，任务置 CANCELED；⑥ item 超时置 FAILED 且 `next_run_at` 按退避后移；⑦ 进程重启后 PENDING item 能被继续消费（不丢任务）；⑧ **SQL 里不许求当前时间**：认领条件写 `next_run_at <= #{nowUtc}`，`nowUtc` 由应用侧 `Instant.now(clock)` 计算后绑定为参数。**禁止** `NOW(3)` / `CURRENT_TIMESTAMP` / `DATE_ADD` / 任何时间字面量出现在认领 SQL 里。理由：`gen_task.next_run_at` 的默认值取自会话时区，若比较基准也在 SQL 里求，"写"和"读"都跟会话漂——应用连接钉了 UTC 时碰巧一致，一旦有人用 CLI 排查或连接池配置被改，认领窗口整体偏移 8 小时，表现为**"任务迟迟不被认领"或"一次性认领过量"，日志里看不出来**。参数化后连 DB 时钟都不依赖。
+⑨ **`next_run_at` 每次写入都必须显式赋值**（`Instant.now(clock).plusSeconds(backoff)`，沿用同一个 `Clock`），**禁止依赖 DDL 默认值** —— 否则就是"写入用会话时区、比较用应用时钟"的双轨换位。测试断言：用固定 `Clock` 造出的行，其 `next_run_at` **等于该 `Clock` 的时刻**（**不是"接近当前时间"**——后者在双轨下也能通过）。
+⑩ **`AuditMetaObjectHandler` 与 `IdGen` 统一注入同一个 `Clock` bean**（现为硬取 `LocalDateTime.now(ZoneOffset.UTC)`，不可做确定性测试）。不单独开补丁，随本任务一起改。
+**与 T03 ⑧、T13 ⑤ 的关系**：同一根因（时间基准与会话时区耦合）的三个落点——写入侧（T03）、比较侧（本任务）、验证侧（T13） |
 | **T07** | **用例生成编排（重试 + 多级降级）** | `generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}.java`<br/>`case/domain/{TestCase,CaseStatus}.java`<br/>`case/mapper/TestCaseMapper.java`<br/>`backend/src/main/resources/mapper/TestCaseMapper.xml`<br/>`frontend/src/pages/tasks/{TaskList,TaskCreateDialog,TaskDetail,ProgressTimeline}.tsx` | T05, T06 | P0 | ① mock provider 下全链路跑出用例，N 个测试点 → ≥N 条用例；② 每个 item 的 `attempts`、`prompt_tokens`、`cost_micro`、`latency_ms` 正确回写；③ **三档降级可复现**：构造坏 JSON → 走 repair 重试（attempts>1）；构造持续坏 → 走宽松解析落库且 `confidence=0.5`；构造上游 500 → 走 provider 重试后置 FAILED；④ 部分 item 失败时任务终态是 **PARTIAL 而非 FAILED**；⑤ **验证 T04 的记账装饰器在编排链路中被真实触发**：每条成功 item 对应 ≥1 条 `llm_call_log`，重试 item 按 `attempt_no` 递增可见（记账本身由 T04 负责，此处只验证"被触发"）；⑥ 用例落库带 `prompt_version`/`model`/`content_hash`；⑦ 任务详情页能看到逐 item 的耗时与错误码 |
 | **T08** | **人工评审与标注数据闭环** | `case/controller/CaseController.java`<br/>`case/service/{CaseService,CaseReviewService}.java`<br/>`case/domain/{CaseReview,ReviewAction}.java`<br/>`case/dto/{TestCaseVO,CaseUpdateReq,ReviewReq}.java`<br/>`case/mapper/CaseReviewMapper.java`<br/>（`RejectReason` 实体与 mapper **已在 T02 归入 `system/`**，本任务只读引用，见 §11.1 D-15）<br/>`frontend/src/pages/cases/{CaseBoard,CaseReviewDrawer,RejectReasonPicker}.tsx`、`frontend/src/api/cases.ts`、`frontend/src/types/cases.ts` | T07 | P0 | ① 采纳/驳回/编辑都落 `case_review` 并同步更新 `test_case.status`；② 驳回**必须**选字典原因码（不传返回 `40002`），自由文本选填；③ 编辑保存 `old_content`/`new_content` 完整快照（可 diff）；④ 批量评审返回 `{updated, skipped}`，跳过原因可查（如已终态）；⑤ 同一用例多次评审**只追加不覆盖**，当前状态取最后一条；⑥ 评审看板支持键盘快捷键（A 采纳 / R 驳回 / E 编辑）与自动下一条 |
 | **T09** | **用例导出（Excel + JUnit 5 骨架）** | `export/controller/ExportController.java`<br/>`export/service/{CaseSnapshotBuilder,ExcelExportService,JUnitExportService}.java`<br/>`export/support/{JUnitNaming,ExcelColumnDef}.java`<br/>`frontend/src/pages/cases/CaseExportDialog.tsx`、`frontend/src/api/exportApi.ts` | T08 | P1 | ① `cases.xlsx` 可被 Excel/WPS 正常打开，含「用例」「统计」两个 sheet，中文不乱码；② 默认只导 ACCEPTED/EDITED，可通过 `statuses` 覆盖；③ JUnit 导出的 `.java` **能通过 `javac` 编译**（含中文 `@DisplayName` 正确转义）；④ 类名/方法名符合 Java 标识符规范（中文标题被转成拼音或 `case_001`，不留非法字符）；⑤ 空用例集返回 `40003` 而不是下载空文件；⑥ 导出文件名带任务号与时间戳 |
 | **T10** | **执行结果导入与失败归因** | `execution/controller/ExecutionController.java`<br/>`execution/service/{ExecutionImportService,FailureTriageService,FailureStatsService}.java`<br/>`execution/parser/{ResultParser,JUnitXmlParser,CsvResultParser}.java`<br/>`execution/domain/{ExecutionRun,ExecutionResult}.java`<br/>（状态复用 `common.enums.ExecutionStatus`；`FailureCategory` 字典实体已在 T02 归入 `system/`，本任务只读引用，见 §11.1 D-14 / D-15）<br/>`execution/mapper/*.java`<br/>`frontend/src/pages/execution/{ExecutionList,ExecutionDetail,FailurePie}.tsx`、`frontend/src/api/execution.ts` | T08 | P1 | ① JUnit XML 与 CSV 都能导入并正确统计 total/passed/failed/skipped；② 大文件用 StAX 流式解析，50MB 文件不 OOM；③ 按 `classname+name` 映射到 `test_case`，页面展示**映射率**；④ 规则归因覆盖 TIMEOUT/ASSERTION/ENV/DEPENDENCY/DATA/UNKNOWN 六类；⑤ 归因结果允许人工纠正且 `triage_source` 变为 MANUAL；⑥ 失败分布饼图与明细表数据一致（同一 SQL 口径） |
-| **T11** | **指标与成本看板** | `metrics/controller/MetricsController.java`<br/>`metrics/service/{MetricsService,CostService,ModelPriceService}.java`<br/>`metrics/domain/{ModelPrice,MetricSnapshot}.java`<br/>`metrics/dto/{OverviewVO,AcceptancePointVO,CostPointVO,QualityVO}.java`<br/>`metrics/mapper/*.java`、`backend/src/main/resources/mapper/MetricsMapper.xml`<br/>`frontend/src/pages/metrics/{OverviewDashboard,AcceptanceChart,CostChart}.tsx`、`frontend/src/api/metrics.ts`<br/><br/>**注**：`LlmCallLog` 实体/mapper 已由 T04 交付（见 §11.1 D-10），本任务**只读聚合**，不重复创建 | T07, T08, T10 | P0 | ① 采纳率口径与 §8.3 完全一致（**分母不含 DRAFT**），构造"3 采纳 1 编辑 2 驳回 4 未评审"数据，断言 accept_rate = 4/6 且 edited_rate = 1/6；② 驳回原因分布只按 `code` 聚合，未知归 OTHER；③ 成本按 task/day/model 三视角求和**与 `llm_call_log` 直接求和完全相等**（差值为 0）；④ 单用例成本 = 总成本 / 已采纳用例数，分母为 0 时返回 0 不返回 NaN；⑤ 所有指标接口支持 `from/to`，默认近 7 天；⑥ 耗时给出 p50/p95（用 SQL 近似或应用层排序） |
+| **T11** | **指标与成本看板** | `metrics/controller/MetricsController.java`<br/>`metrics/service/{MetricsService,CostService,ModelPriceService}.java`<br/>`metrics/domain/{ModelPrice,MetricSnapshot}.java`<br/>`metrics/dto/{OverviewVO,AcceptancePointVO,CostPointVO,QualityVO}.java`<br/>`metrics/mapper/*.java`、`backend/src/main/resources/mapper/MetricsMapper.xml`<br/>`frontend/src/pages/metrics/{OverviewDashboard,AcceptanceChart,CostChart}.tsx`、`frontend/src/api/metrics.ts`<br/><br/>**注**：`LlmCallLog` 实体/mapper 已由 T04 交付（见 §11.1 D-10），本任务**只读聚合**，不重复创建 | T07, T08, T10 | P0 | ① 采纳率口径与 §8.3 完全一致（**分母不含 DRAFT**），构造"3 采纳 1 编辑 2 驳回 4 未评审"数据，断言 accept_rate = 4/6 且 edited_rate = 1/6；② 驳回原因分布只按 `code` 聚合，未知归 OTHER；③ 成本按 task/day/model 三视角求和**与 `llm_call_log` 直接求和完全相等**（差值为 0）；④ 单用例成本 = 总成本 / 已采纳用例数，分母为 0 时返回 0 不返回 NaN；⑤ 所有指标接口支持 `from/to`，默认近 7 天；⑥ 耗时给出 p50/p95（用 SQL 近似或应用层排序）；⑦ **指标 SQL 必须在 `ONLY_FULL_GROUP_BY` 下可直接执行**：所有非聚合列显式列入 `GROUP BY`（确需"随便取一个"时写 `ANY_VALUE(col)` 显式表态，而不是靠 MySQL 宽容），**不许**用 `SET SESSION sql_mode = ''` / `SET sql_mode = REPLACE(@@sql_mode,'ONLY_FULL_GROUP_BY','')` 绕过。理由：MySQL **8.0 起 `ONLY_FULL_GROUP_BY` 是默认 `sql_mode` 的一部分**，本机恰好开着，所以"绕过"的写法在开发机看不出问题；一旦换到策略更严的托管实例（RDS/PolarDB 常在会话级再收紧），`GROUP BY t.status` 却 `SELECT t.id` 就报 `1055 Expression #1 of SELECT list is not in GROUP BY clause`，而这条链路（看板）恰恰是演示时第一个被打开的页面。**验收方式**：在 `@@sql_mode` 已含 `ONLY_FULL_GROUP_BY` 的会话里逐条跑 `MetricsMapper.xml` 的全部语句（含 `from/to` 绑定），并 `grep -c 'sql_mode' backend/src/main/resources/mapper/` **期望 0** —— 绕过语句的计数必须是 0，不是"有但没触发" |
 | **T12** | **前端集成与交互打磨** | `frontend/src/components/layout/{AppShell,SideNav,TopBar}.tsx`<br/>`frontend/src/components/common/{DataTable,StatusChip,EmptyState,ErrorBoundary,ConfirmDialog,JsonViewer,PageHeader}.tsx`<br/>`frontend/src/components/charts/ChartCard.tsx`<br/>`frontend/src/routes/index.tsx`（完整路由 + 守卫；T02 建骨架，T12 补全）<br/>`frontend/src/hooks/{usePagedQuery,useDict}.ts`<br/>各页面接入统一组件 | T03, T05, T07, T08, T09, T10, T11 | P1 | ① 6 个模块全部可从左侧导航进入，URL 可直达可刷新；② 所有异步请求有 loading（骨架屏）/ error（重试按钮）/ empty（引导文案）三态；③ 全局错误统一走 `enqueueSnackbar`，不出现 `alert`；④ 表格分页/排序/筛选与后端 `PageQuery` 严格对齐；⑤ `tsc --noEmit` 零错误；⑥ 1280px 与 1920px 下布局无错位、无横向滚动条 |
-| **T13** | **质量保障：单元 + 集成测试** | `backend/src/test/java/com/aittest/doc/{DocxParserTest,OpenApiParserTest}.java`<br/>`aicore/{StructuredOutputParserTest,MockProviderTest}.java`<br/>`generation/CaseGenerateOrchestratorTest.java`<br/>`metrics/MetricsServiceTest.java`<br/>`export/JUnitExportServiceTest.java`<br/>`backend/src/test/java/com/aittest/api/ApiSmokeIT.java`<br/>`backend/src/test/resources/{application-test.yml,fixtures/*}`<br/>`frontend/vitest.config.ts` + `frontend/src/**/__tests__/*.test.tsx` | T12 | P1 | ① `mvn test` 全绿，且覆盖：坏 JSON 修复 4 类、三档降级分支、采纳率口径、JUnit 生成可编译；② `ApiSmokeIT` 用 mock provider 跑通「上传→抽点→生成→评审→导出→导入→指标」全链路并断言关键数值；③ 测试**不依赖外网、不需要 API Key**（CI 友好）；④ 前端至少 3 个组件测试（CaseBoard 的键盘评审、StatusChip 色板、DataTable 分页）；⑤ **时区回归（`TimezoneIT`，专门盯 §11.1 D-12 那个"看着自洽、实则依赖前提"的坑）**：(a) **以 `UTC_TIMESTAMP(3)` 为基准**断言新插入行的 `created_at` 与之差 < 2 秒——**禁止拿 `NOW(3)` 做基准比**，`NOW(3)` 取的是会话时间，两值恒等，这个断言永远为真、等于没测；(b) 至少覆盖 **"连接池重建后的第一条插入"**（用 `HikariDataSource.evictConnection()` 或直接关停再重建连接池来模拟），断言该行同样对齐——这是"某一次连接没设上时区"唯一能被抓住的时机；(c) 在应用实际使用的连接上断言 `SELECT @@session.time_zone = '+00:00'`，而不是在测试自己新开的连接上断言。三条缺一，这个测试就只是心理安慰 |
-| **T14** | **演示数据、文档与一键启动** | `README.md`<br/>`scripts/{init-demo.sh,reset-db.sh}`<br/>`backend/src/main/resources/db/demo/V100__demo_data.sql`<br/>`docs/{02-api.md,03-runbook.md,04-interview-notes.md}`<br/>`docs/diagrams/*.mermaid`（三张图随代码演进同步更新）<br/>`backend/src/main/resources/application-prod.yml`（生产 profile，见 §11.1 D-09） | T12 | P2 | ① 新机器按 README 三步（起 MySQL → `mvn spring-boot:run` → `npm run dev`）一次跑通，无手工改配置；② demo 数据含 1 份 OpenAPI 文档 + 1 个 SUCCESS 任务（含 3 个 PARTIAL 场景）+ 30 条用例（采纳 12 / 编辑 4 / 驳回 6 / 待评审 8）+ 1 次执行结果，**指标看板打开即有真实曲线**；③ `reset-db.sh` 可一键回到干净状态；④ `04-interview-notes.md` 对四大难点各给出「问题→方案→取舍→量化结果」四段式口述稿；⑤ 运行手册列出所有错误码的含义与处置动作；⑥ **`application-prod.yml` 交付且可验证"失败"**：`--spring.profiles.active=prod` 且不提供 `DB_PASSWORD` 时**必须启动失败**（不允许任何默认值兜底），提供后才正常起；⑦ **运行手册必须有「手工修数据」一节**：写明人工连库须 `mysql --init-command="SET time_zone='+00:00'"`、GUI 工具连上先执行 `SET time_zone='+00:00'`，并附复核 SQL `SELECT id, updated_at, UTC_TIMESTAMP(3) ... LIMIT 5`（差值 > 2 秒即为写歪）。理由见 §3.2.1.2：任何人绕过连接池 `UPDATE`，`ON UPDATE CURRENT_TIMESTAMP(3)` 都会写进本地时间，而 T13 ⑤ 只测应用连接、抓不到这类脏数据 |
+| **T13** | **质量保障：单元 + 集成测试** | `backend/src/test/java/com/aittest/doc/{DocxParserTest,OpenApiParserTest}.java`<br/>`aicore/{StructuredOutputParserTest,MockProviderTest}.java`<br/>`generation/CaseGenerateOrchestratorTest.java`<br/>`metrics/MetricsServiceTest.java`<br/>`export/JUnitExportServiceTest.java`<br/>`backend/src/test/java/com/aittest/api/ApiSmokeIT.java`<br/>`backend/src/test/resources/{application-test.yml,fixtures/*}`<br/>`frontend/vitest.config.ts` + `frontend/src/**/__tests__/*.test.tsx` | T12 | P1 | ① `mvn test` 全绿，且覆盖：坏 JSON 修复 4 类、三档降级分支、采纳率口径、JUnit 生成可编译；② `ApiSmokeIT` 用 mock provider 跑通「上传→抽点→生成→评审→导出→导入→指标」全链路并断言关键数值；③ 测试**不依赖外网、不需要 API Key**（CI 友好）；④ 前端至少 3 个组件测试（CaseBoard 的键盘评审、StatusChip 色板、DataTable 分页）；⑤ **时区回归 `TimezoneIT`（MySQL-only，见下方⑥）——DB 侧与 JVM 侧必须各有一条**：
+**(I) DB 侧**（测"会话是否被钉住"）：(a) 在应用实际连接上执行 `SELECT CURRENT_TIMESTAMP(3), UTC_TIMESTAMP(3), @@session.time_zone`，断言 `@@session.time_zone='+00:00'` **且前两者之差 < 2 秒**（`CURRENT_TIMESTAMP` 取会话时区、`UTC_TIMESTAMP` 会话无关，两者相等即会话已钉住）；(b) 从 `ApplicationContext` **枚举所有 `DataSource` bean**（当前 1 个，将来多数据源自动覆盖），对**每一个**池**逐条**取连接断言同一组值，逐个打到 WARN 日志；若只有一个 bean 也必须校验它 —— **不得用 `JdbcTemplate` 做这些断言**（池已被自己占满，再取连接会阻塞 `connectionTimeout` 默认 30s 后抛 `SQLTransientConnectionException`，测试会以一个与时区无关的异常红掉）；N 以**实际 acquire 到的条数**为准，不硬编码；测试 profile 把 `maximum-pool-size` 降到 2~4。如需覆盖"连接重建"，用 `evictConnection()` 时**必须断言其返回 `true`** 并在**踢完之后新取的那条连接**上断言（返回 `false` 表示该连接仍忙、没被踢掉；不检查就是空转），且 **`assertNotSame` 新旧连接**。
+**(II) JVM 侧**（测"应用时钟是否仍是 UTC"）：临时把 JVM 默认时区改为 `Asia/Shanghai` 后做一次 MP insert，查回来的 `created_at` 仍须与 `UTC_TIMESTAMP(3)` 差 < 2 秒 —— 这条抓的是"有人把 `AuditMetaObjectHandler` 里的 `ZoneOffset.UTC` 改成无 Zone 的 `now()`"。
+> **两条缺一不可**：只做 (I) 则 JVM 侧无人看管；只做 (II) 则会话侧无人看管。早期版本只写了"断言表里的 `created_at`"，而那正好测的是唯一不受会话影响的那条路径 —— 会话漂成 +08 它照样绿（§3.2.1.1「测错对象」）。
+**(III) 跳过的条件必须显式**：`@Tag("mysql")` + `@EnabledIf` 判环境变量，**跳过时必须打 `WARN` 说明原因**（"未检测到 MySQL 连接，跳过时区回归"），不许静默 skip —— 静默 skip 会让"测试是绿的"变成"根本没用跑过"。
+⑥ **T13 不许把 `TimezoneIT` 切到 H2**（原因见 §11.1 D-18）：H2 对 `@@session.time_zone` 与 `UTC_TIMESTAMP(3)` 都不支持；**且实测发现 H2 的 `FOR UPDATE SKIP LOCKED` 语义与 MySQL 不同**（H2 2.x 该语法标注 `@Deprecated`，语义是"失败时静默跳过、不阻塞"，MySQL 是"跳过已锁行、继续返回其余行"）——**方言差异会让并发测试变成假绿灯**，所以凡涉及时区与行锁的用例一律只跑真实 MySQL |
+| **T14** | **演示数据、文档与一键启动** | `README.md`<br/>`scripts/{init-demo.sh,reset-db.sh}`<br/>`backend/src/main/resources/db/demo/V100__demo_data.sql`<br/>`docs/{02-api.md,03-runbook.md,04-interview-notes.md}`<br/>`docs/diagrams/*.mermaid`（三张图随代码演进同步更新）<br/>`backend/src/main/resources/application-prod.yml`（生产 profile，见 §11.1 D-09） | T12 | P2 | ① 新机器按 README 三步（起 MySQL → `mvn spring-boot:run` → `npm run dev`）一次跑通，无手工改配置；② demo 数据含 1 份 OpenAPI 文档 + 1 个 SUCCESS 任务（含 3 个 PARTIAL 场景）+ 30 条用例（采纳 12 / 编辑 4 / 驳回 6 / 待评审 8）+ 1 次执行结果，**指标看板打开即有真实曲线**；③ `reset-db.sh` 可一键回到干净状态；④ `04-interview-notes.md` 对四大难点各给出「问题→方案→取舍→量化结果」四段式口述稿；⑤ 运行手册列出所有错误码的含义与处置动作；⑥ **`application-prod.yml` 交付且可验证"失败"**：`--spring.profiles.active=prod` 且不提供 `DB_PASSWORD` 时**必须启动失败**（不允许任何默认值兜底），提供后才正常起；⑦ **运行手册必须有「手工修数据」一节**：写明人工连库须 `mysql --init-command="SET time_zone='+00:00'"`、GUI 工具连上先执行 `SET time_zone='+00:00'`，并附复核 SQL `SELECT id, updated_at, UTC_TIMESTAMP(3) ... LIMIT 5`（差值 > 2 秒即为写歪）。**必须点明"字面写 table、实际是行级"**：`ON UPDATE CURRENT_TIMESTAMP(3)` 只对被 `UPDATE` 命中的行求值，所以一次 `UPDATE ... WHERE id = 42` 污染的**恰好就是你正准备修的那一行**，`WHERE` 漏写才是整表污染 —— 这条不是"影响面小所以无所谓"，而是"你越急着修数据，越容易顺手把那一行的时间戳写歪 8 小时，而且复核 SQL 不跑就永远发现不了"。理由见 §3.2.1.2：任何人绕过连接池 `UPDATE`，`ON UPDATE CURRENT_TIMESTAMP(3)` 都会写进本地时间，而 T13 ⑤ 只测应用连接、抓不到这类脏数据；⑧ **`TimezoneGuard` 的 WARN 必须真的能被看见**：`application-prod.yml` 与服务启动参数里**不得把日志级别调到 WARN 以上**（`root: error` 之类会把 `[TZ-GUARD]` 整条吞掉），**不得新增 `logback-spring.xml` 之外的日志配置文件去覆盖级别**；README 的启动校验清单里加一条可执行验证——正常启动的日志中 `grep -c '\[TZ-GUARD\]'` **期望 0**（配置正确时不该出现），人为把 JDBC URL 里的 `forceConnectionTimeZoneToSession` 删掉后重启，`grep -c` **期望 ≥1**。理由：T03 ⑨ 的这条护栏本身只是 `log.warn`，一旦日志级别把它压掉，"有时区自检"就退化成"有个类叫 TimezoneGuard"，比没有更危险（见 §11.1 D-18 的同类现象：H2 的 `SKIP LOCKED` 也是"看着有、实际语义不对"）；⑨ **运行手册必须有一张「这些用例只能跑真实 MySQL」清单**（与 T13 ⑥ 同源，代码侧是约束、手册侧是给人看的）：`@@session.time_zone` 与 `UTC_TIMESTAMP(3)`（H2 直接语法/函数不存在）、`DEFAULT CURRENT_TIMESTAMP(3)` 的会话求值语义、`ON UPDATE CURRENT_TIMESTAMP(3)` 的触发路径、`FOR UPDATE SKIP LOCKED` 的并发语义（H2 标 `@Deprecated` 且"失败时静默跳过"≠ MySQL"跳过已锁行继续返回"）、`1406`/`1062` 的错误码映射（H2 错误码不同，映射失效）、`sql_mode` 的 `STRICT_TRANS_TABLES`/`ONLY_FULL_GROUP_BY`、唯一索引与 `utf8mb4` 字符长度语义。**可以留在 H2 的**：纯解析单测（`DocxParserTest`/`OpenApiParserTest`/`StructuredOutputParserTest`）与 `ApiSmokeIT`（mock provider 全链路） |
 
 ### 6.1 任务依赖图
 
@@ -1295,7 +1364,14 @@ graph LR
 - **`traceId` 依赖 MDC 键名常量 `TraceFilter.MDC_TRACE_ID = "traceId"`**：`ApiResponse.currentTraceId()` 从 MDC 取这个键。改名不会编译报错，只会让所有响应的 `traceId` **静默变成空串**——排查链路直接断掉。T02 扩展 `TraceFilter` 时不要动这个常量名与 finally 清理逻辑。
 - **禁止在 `ApiResponse` 上加任何会形成 getter 的新方法**（如 `isSuccess()` / `getOK()` / `hasData()`），除非同时加 `@JsonIgnore`。原因：Jackson 默认按 getter 反射序列化，`isSuccess()` 会**凭空多出一个 `"success": true` 字段**。实测代价：`/api/health` 响应体从 4 个字段变成 5 个，而前端按"字段数恒定"写的 schema 断言直接红掉，排查方向却会先怀疑拦截器。加工具方法请一律标 `@JsonIgnore`，或改成 `static` 工具。
 - 失败：`code != 0`，`message` 为**面向用户的中文**（可直接 toast），技术细节只进日志。
-- HTTP 状态码策略：业务错误统一 `200` + `code!=0`（前端 axios 拦截器按 `code` 判断）；**仅**鉴权失败用 `401`、未找到用 `404`、限流用 `429` 以兼容网关与浏览器行为。**注意 Spring 6.1 起静态资源/路由不匹配走的是两条不同异常**：`NoHandlerFoundException`（需 `spring.mvc.throw-exception-if-no-handler-found: true`）与 `NoResourceFoundException`（`spring.web.resources.add-mappings: false` 时抛）。`GlobalExceptionHandler` **必须两个都接**并统一映射为 `40401`，只接前者会让不存在的路径返回 Spring 默认错误页（HTML + `{"timestamp",...}`，前端解包直接崩）。
+- HTTP 状态码策略：业务错误统一 `200` + `code!=0`（前端 axios 拦截器按 `code` 判断）；**仅**鉴权失败用 `401`、未找到用 `404`、限流用 `429` 以兼容网关与浏览器行为。
+- **注意 Spring 6.1 起静态资源/路由不匹配走的是两条不同异常**：`NoHandlerFoundException`（需 `spring.mvc.throw-exception-if-no-handler-found: true`）与 `NoResourceFoundException`（`spring.web.resources.add-mappings: false` 时抛）。`GlobalExceptionHandler` **必须两个都接**并统一映射为 `40401`，只接前者会让不存在的路径返回 Spring 默认错误页（HTML + `{"timestamp",...}`，前端解包直接崩）。
+- **`DataIntegrityViolationException` 必须单独接住，不能落到兜底 `Exception` → `50000`。** 现状（T02 交付）该异常没有对应分支，于是"用户输入超长"和"唯一键冲突"都会伪装成"系统内部错误"，有两个后果：① 错误码说谎，用户以为系统坏了；② **`50000` 失去信噪比** —— 它本应只在"我们确实没想到"时出现，一旦开始覆盖"我们想到了但没接"，这个码就废了。要求：
+- `1406 Data too long` → **`40004 E_FIELD_TOO_LONG`**，字段名从异常消息里提取后**必须白名单化**再回显（比对实体已知字段名），**禁止把 SQL 原文吐给前端**（会泄露表结构）
+- `1062 Duplicate entry` → **`40902 E_DUPLICATE`**，`data.conflictOn` 给冲突类型（`doc_no` / `file_hash` / 其它），不返回键值本身
+- 两条都要带 `traceId`
+
+> 注：`1406` 与 `1062` 都是**应用层校验漏网**的症状。正确顺序是"应用层先判（长度/唯一性）→ DB 约束只作最后一道网"，见 §3.2.1.2 与 §8.1.1 字段长度清单。**不要让用户输入走到数据库约束才被发现。**
 
 | code | 常量 | 含义 | 前端处置 |
 |---|---|---|---|
@@ -1303,12 +1379,14 @@ graph LR
 | 40001 | `E_PARAM_INVALID` | 参数校验失败 | toast 具体字段 |
 | 40002 | `E_REQUIRED_MISSING` | 必填缺失（如驳回未选原因） | 表单内联提示 |
 | 40003 | `E_EMPTY_RESULT` | 无可导出/可操作数据 | toast 引导 |
+| 40004 | `E_FIELD_TOO_LONG` | 字段超长（DB `1406 Data too long` 的应用侧映射） | toast 具体字段与上限 |
 | 40101 | `E_UNAUTHORIZED` | 未登录/token 缺失 | 清 token 跳登录 |
 | 40102 | `E_TOKEN_INVALID` | token 过期或被篡改 | 清 token 跳登录 |
 | 40301 | `E_FORBIDDEN` | 无权限操作该资源 | toast |
 | 40401 | `E_NOT_FOUND` | 资源不存在 | 404 页/空态 |
 | 40901 | `E_STATE_ILLEGAL` | 状态机拒绝（如对 SUCCESS 任务 cancel） | toast 当前状态 |
-| 42001 | `E_DOC_PARSE_FAILED` | 文档解析失败 | 详情页展示 `parse_error` |
+| 40902 | `E_DUPLICATE` | 唯一键冲突（DB `1062 Duplicate entry` 的应用侧映射），`data.conflictOn` 给出冲突类型（`doc_no` / `file_hash` / 其它） | toast 并高亮重复项 |
+| 42001 | `E_DOC_PARSE_FAILED` | **仅 `POST /api/docs/{id}/reparse`**：文档已删除或拿到了内容但解析不出来 | 已删除 → 提示"文档已删除，请重新上传"；否则展示 `parse_error` |
 | 42002 | `E_DOC_UNSUPPORTED` | 不支持的格式/超大小 | toast |
 | 42003 | `E_DOC_NOT_PARSED` | 文档未解析完成就发起生成 | toast 并禁用按钮 |
 | 43001 | `E_TASK_NOT_RETRYABLE` | 任务非 PARTIAL/FAILED 不可重试 | 禁用按钮 |
@@ -1320,6 +1398,26 @@ graph LR
 | 50005 | `E_SCHEMA_INVALID` | schema 校验不通过 | 同上，含字段路径 |
 | 50000 | `E_INTERNAL` | 未预期异常 | 通用提示 + traceId |
 
+#### 8.1.1 字段长度清单（应用层先判，DB 约束兜底）
+
+`V1__schema.sql` 里所有 `VARCHAR(n)` 都是**字符数**上限（`utf8mb4`，不是字节数），超一个字符就是 `1406`。本表只列**会被"外部内容"撑爆**的列——由代码生成的定长列（`doc_no` 16 字符、`file_hash` 64）不在内。
+
+| 列 | 上限 | 内容从哪来 | 越界概率 | 处置 |
+|---|---|---|---|---|
+| `doc_source.name` | 255 | **用户上传的原始文件名** | 中。Linux 单段文件名上限恰好 255 **字节**，中文名 85 个汉字就到 255 字节但只有 85 字符（不炸）；可 macOS 允许 255 个**字符**，一个 300 字符的文件名在 Windows/macOS 上完全合法 | **拒绝** → `40004`，`message` 带实际上限与当前长度。不要自动截断：文件名是用户认领文件的唯一标识，截断后两个文件会同名 |
+| `doc_source.storage_path` | 500 | 由文件名+ID 拼接生成 | **由上一行派生** | 校验 `name` 时一并校验拼接后的落盘路径长度。这是最容易漏的一条：`name` 过了 255 却把 `storage_path` 撑到 500+ |
+| `doc_section.heading` | 500 | **文档内容**（解析器产出） | 高。真实需求文档的标题常带整段编号 | **截断** + WARN，保留前 500 字符。理由是"标题只是展示用，截断不影响解析"，而拒绝会让整份文档解析失败 |
+| `api_operation.path` | 500 | **OpenAPI 文件的 `paths` key** | 高。实测踩过 612 字符的 path（见 §4.2.1 的 `parse_error` 示例） | **拒绝该 operation**（记入 `failedSections`），其余照常解析——单条 path 超长不该拖垮整份文档 |
+| `test_point.title` / `test_case.title` | 500 | **LLM 输出** | 高，且**最容易被误判为"不是用户输入"**。模型完全可能把整段需求描述塞进 `title` | **截断** + `degraded=1`，并在 `llm_call_log` 记一条 WARN。理由是"拒掉整条 item 的代价远大于截断一个标题" |
+| `case_review.reason_text` | 1000 | 用户自由文本 | 低（前端 `maxLength` 已限） | **拒绝** → `40004`。前端限了不代表后端可以不判：`curl` 与 Postman 直接打接口是绕过前端的 |
+| `gen_task.error_msg` / `gen_task_item.error_msg` / `doc_source.parse_error` | 1000 | **异常消息 / 上游返回体** | 高。上游 5xx 的 HTML 错误页、`SQLException` 的长消息、`OpenAPI` 解析器的嵌套 cause 拼起来轻松过千 | **截断**，保留**头部 200 字符 + 尾部 200 字符**（中间 `…`）。只留头部会丢掉真正的根因——Java 异常链的 `Caused by` 往往在尾巴上 |
+
+**为什么不能只靠 DB 约束**：`STRICT_TRANS_TABLES` 下报 `1406` 时，异常消息里的字段名是 **MySQL 的列名**（`Data too long for column 'title' at row 1`），把它直接回显给用户等于泄露表结构（所以 §8.1 要求白名单化）；更要紧的是**时机**——用户已经等了 LLM 十几秒，到落库才炸，整条 item 白跑，而校验本可以在起跑前做完。
+
+**为什么不能只靠应用层校验**：写入路径不止一条（`BaseMapper`、手写 XML 批量插入、`V100__demo_data.sql`、运维手工 `INSERT`），任何一条漏判都会产生脏数据或 500。**DB 约束是唯一对所有路径都生效的一道网**，它的职责是"兜底"，不是"主要防线"。两层都要有，但**报错话术与错误码只由应用层决定**。
+
+> 反过来，**如果 `sql_mode` 里没有 `STRICT_TRANS_TABLES`，这整张表就失去了意义** —— MySQL 会静默截断并返回成功，应用层以为存好了（见 §8.2 `sql_mode` 一行）。
+
 ### 8.2 ID 与时间
 
 | 约定 | 规则 |
@@ -1327,6 +1425,7 @@ graph LR
 | 主键 | MyBatis-Plus 雪花 `bigint`。雪花策略在 `application.yml` 的 `mybatis-plus.global-config.db-config.id-type: assign_id` **全局声明**，实体上只需 `@TableId`（不必逐个写 `type`，但写了也不冲突）；**JSON 一律序列化为字符串**（`JacksonConfig` 全局注册 `Long → ToStringSerializer`），前端 TS 类型定义为 `string` |
 | 业务单号 | `IdGen.docNo()` → `D20261107-000123`；`taskNo()` → `T20261107-000123`；`runNo()` → `R20261107-000123`。**分配机制 = 播种 + 重试，不是「撞库兜底」**：计数按「前缀 + 日期」隔离（三个前缀共用一个计数器会让 `doc_no` 跳号，而单号要写进 Excel 与 JUnit 注释供人追溯）；每个「前缀 + 日期」首次取号时由 `config/IdGenSeederConfig` 用**裸 `JdbcTemplate`** 查该表当日 `MAX(序号)` 作为起点（**SQL 不得带 `deleted = 0`**——唯一索引不看逻辑删标记，软删行照样占号，漏掉就播种偏小、重启继续撞键，与 §3.2.2 `file_hash <> ''` 是同一类陷阱）；撞键后**重新播种**（`nextAfterConflict`）而非 `++`，多实例才能一步收敛。写库调用点用 `generateWithRetry`，连续 3 次撞键抛 **40901**（不落 50000）；当日序号达 6 位上限（999999）同样抛 40901。**`generateWithRetry` 的 action 必须是一次独立事务边界**——事务内抛 `DuplicateKeyException` 后 Spring 已将其标记 rollback-only，同事务重试必然继续失败 |
 | 数据库时间 | 所有 `datetime(3)` 字段**存 UTC**。锁死口径要**两处**：JDBC `connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true`（强制会话 `time_zone='+00:00'`）＋ Jackson `time-zone: UTC`。**只配 `serverTimezone=UTC` 是不够的**——它不改会话时区（详见 §3.2.1）。**DDL 侧不需要动，也不许动**：保持 `DEFAULT CURRENT_TIMESTAMP(3)` / `ON UPDATE CURRENT_TIMESTAMP(3)`，它会随已锁死的会话自动成为 UTC。**不要用 `DEFAULT (UTC_TIMESTAMP(3))` 做"双重保险"**：`ON UPDATE` 子句只接受 `CURRENT_TIMESTAMP`、语法上换不动（`ERROR 1064`），只换 `DEFAULT` 必然造成"插入 UTC / 更新会话"的双轨（见 §3.2.1.1 与 §11.1 D-16）。**用途区分：写库用 `CURRENT_TIMESTAMP` / `NOW(3)`（与会话同源、与默认值同轨），读与断言用 `UTC_TIMESTAMP(3)`（唯一会话无关的真 UTC）。** `created_at` **全表必有**；`updated_at` **仅 9 张可变表有**，只追加表与字典表刻意不设。两者均由 `MetaObjectHandler` 自动填充，**业务代码禁止手写**；DDL 侧另有 `DEFAULT CURRENT_TIMESTAMP(3) [ON UPDATE ...]` 兜底，绕过 ORM 的批量 SQL 也不会漏填 |
+| 数据库 `sql_mode` | **`STRICT_TRANS_TABLES` 是依赖，不是可选项。** 全项目假定 MySQL 的 `sql_mode` 含 `STRICT_TRANS_TABLES` 与 `ONLY_FULL_GROUP_BY`：前者决定"超长/类型不符"是**报 `1406` 错误**还是**静默截断**，后者决定 `GROUP BY` 的写法。**没有它，`40004`/`40902` 这套映射全部失效而且不报错** —— 120 个字符写进 `VARCHAR(100)` 会被 MySQL 悄悄砍成 100 后成功返回，应用层以为存好了，前端展示却少了尾巴，这类脏数据只有等导出 Excel 被业务发现。要求：① 本机/T14 交付的初始化脚本**显式写 `sql_mode`**，不依赖 MySQL 版本默认值（8.0 默认含 `STRICT_TRANS_TABLES`，但 5.7 与部分云实例的默认值不同）；② **测试 profile 必须与生产一致**（`application-test.yml` 不得关掉 strict 模式换取"测试好过"——那等于测了一个不存在的数据库）；③ 应用启动时若检测到 `sql_mode` 缺 `STRICT_TRANS_TABLES`，打 WARN（与 `TimezoneGuard` 同一类"告警网"，见 T03 ⑨），不做语法层面的修复 |
 | 软删 | 只有 `doc_source` 有 `deleted` 字段，由 MyBatis-Plus 逻辑删除接管（`logic-delete-field: deleted` / `1` / `0`）。**含义**：`BaseMapper` 的 `selectById`/`updateById`/`deleteById` 自动带条件；但**手写 XML 的聚合与存在性校验必须自己加 `deleted = 0`**，否则会把已删文档的用例算进指标 |
 | API 时间 | Jackson 全局 `WRITE_DATES_AS_TIMESTAMPS=false`，格式 `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`；前端 dayjs 转 `Asia/Shanghai` 展示 |
 | 统计口径时间 | 指标接口的 `from/to` 按**用户本地日期**（`Asia/Shanghai`）解析后再转 UTC 查库，避免"昨天的数据算到今天"这类争议 |
@@ -1453,10 +1552,13 @@ spring:
 | `EXPORT_TEMP_DIR` | `${EXPORT_TEMP_DIR:exports}` | `exports`（相对后端工作目录；JUnit zip 的临时落盘位置） | ❌ |
 | `EXPORT_JUNIT_PACKAGE` | `${EXPORT_JUNIT_PACKAGE:com.aittest.generated}` | `com.aittest.generated`（生成的 JUnit 5 骨架的默认包名，T09 可被请求参数覆盖） | ❌ |
 | `EXPORT_JUNIT_TIMEOUT_SECONDS` | `${EXPORT_JUNIT_TIMEOUT_SECONDS:30}` | 30（单个 JUnit 方法骨架的 `@Timeout` 缺省值） | ❌ |
+| `STORAGE_DIR` | `${STORAGE_DIR:uploads}` | `uploads`（相对后端工作目录；**原始上传文件的落盘根目录**，实际按 `uploads/docs/yyyyMMdd/uuid.ext` 分层。T03 引入 `config/StorageProperties`，`@ConfigurationProperties(prefix = "storage")`） | ❌ |
+
+> **本表按前缀分组**，`STORAGE_DIR` 虽属运行时目录一类，仍放在表尾而不插进 `EXPORT_*` 中间——它和 `EXPORT_*` 的相近之处只有"都是相对路径"，语义上一个存**用户输入**（丢了要用户重传）、一个存**可再生的导出产物**（丢了重新导）。**混淆这两者的代价不对等**，所以宁可让表格分组的边界与语义边界一致。
 
 **`AUTH_TOKEN_SECRET` 空值降级的取舍**：允许为空是刻意的——否则新克隆的仓库第一步就起不来，违背"零配置可跑"。但代价必须明确：**每次重启都会重新生成密钥，已签发的 token 全部失效**（演示时表现为"刚登录又被打回登录页"）。生产由 `application-prod.yml`（T14）用 `${AUTH_TOKEN_SECRET}` 无默认值形式强制注入，缺失即启动失败。
 
-**`EXPORT_TEMP_DIR` 的坑**：它是**相对路径**，解析基准是**后端进程的工作目录**（`mvn spring-boot:run` 时是 `backend/`，`java -jar` 时是启动目录）。所以"从仓库根启动"和"从 `backend/` 启动"会落到两个不同目录。T09 实现时应 `Path.of(dir).toAbsolutePath()` 并在启动日志里打一行实际绝对路径，否则"导出的 zip 找不到"会查很久。
+**相对路径配置项的坑（`EXPORT_TEMP_DIR` / `STORAGE_DIR` 同罪）**：两者都是**相对路径**，解析基准是**后端进程的工作目录**（`mvn spring-boot:run` 时是 `backend/`，`java -jar` 时是启动目录）。所以"从仓库根启动"和"从 `backend/` 启动"会落到两个不同目录——同一个 `STORAGE_DIR=uploads`，两处启动就是两个互不相见的文件库，症状是"刚传的文档打不开、重启后又好了"（其实是换了个目录）。要求固定两条：① `Path.of(dir).toAbsolutePath().normalize()` 后再用；② **在首次建出当日目录时打一行 INFO 实际绝对路径**（T03 已按此实现，实测从 `backend/` 启动落到 `backend/uploads/docs/20261107/…`）。T09 的 zip 落盘照同一套做。**为什么不能只靠"约定从 backend/ 启动"**：约定是文档，`java -jar` 与 IDE 的运行配置都绕过它，而这类错误不会报错、只会让数据看起来"凭空消失"。
 
 **`AI_MODEL` 的缺省值必须是 `mock-model`，不能是空串**——`V2__dict_and_config.sql` 的 `model_price` 种子行里 mock 的 `model` 正是 `mock-model`（单价 0/0）。若缺省为空串，`llm_call_log.model = ''` 与 `model_price.model` 关联不上 → 成本归集查不到单价，mock 演示的成本恒为 0 且**看不出是"算对了"还是"没算"**。这属于"明确非敏感值"，不违反下面"禁止默认密码/Key"的硬约束。
 
@@ -1464,10 +1566,10 @@ spring:
 
 **占位符一律写成 `${KEY:默认值}` 形式**，不写 `${KEY}`。理由：不写默认值时缺失即启动失败，而本项目要求"克隆下来零配置能跑起来"（mock provider + 本地空密码 MySQL）。
 
-#### ③ 新增配置项的固定动作（三步，缺一不可）
+#### ③ 新增配置项的固定动作（四步，缺一不可）
 
 ```
-① 先加 .env.example   →  ② 再加 yml 占位符   →  ③ 最后本地 .env 填值
+① 先加 .env.example  →  ② 再加 yml 占位符  →  ③ 本地 .env 填值  →  ④ 写盘类配置另补 .gitignore
 ```
 
 | 步骤 | 动作 | 漏了会怎样 |
@@ -1475,11 +1577,13 @@ spring:
 | ① | 在 `.env.example` 追加 `KEY=` 并加注释说明可选值与来源 | 别人不知道该配什么，只能翻代码猜；新配置永远进不了新环境 |
 | ② | 在 `application.yml` 写 `${KEY:默认值}`，**同时在上表登记一行** | 配置项存在但没人用；或用了 `${KEY}` 无默认值导致零配置启动失败 |
 | ③ | 本地 `.env` 填真实值 | —（仅影响自己，不影响他人） |
+| ④ | **仅当该配置项指向一个写盘目录**（`*_DIR`）：同一个 commit 里把它加进 `.gitignore` | 产物出现在 `git status` 里，`git add .` 迟早把它带进仓库。`exports/` 就是这么漏的（见下方硬约束） |
 
 **硬约束**
 
 - **禁止在 `application.yml` / `application-dev.yml` 里写任何默认密码、默认 API Key、默认 token**。默认值只能是"空字符串"或"明确非敏感的本地值（`127.0.0.1`、`3306`、`mock`）"。一旦写了，它会一路带到生产，且 code review 时很难被发现——因为它"看起来只是个默认值"。
 - **禁止提交 `.env`**。`.gitignore` 已含 `.env`（规则在第 25 行）。若发现自己 commit 里出现 `.env`，必须 `git rm --cached .env` 并**轮换已泄露的所有凭据**（历史 commit 里删不掉）。
+- **任何"写盘的配置项"必须与它的产物目录在同一次提交里进 `.gitignore`**（即上面第 ④ 步）。配置项解决"写哪儿"，`.gitignore` 解决"别提交"，漏了后者就是给下一个人埋雷。**现状核查**：`.gitignore` 已含 `data/` `uploads/` `exports/` `logs/`（`exports/` 于本批补齐，见 §11.1 D-20，已实测 `git check-ignore -v backend/exports/x.zip` → `.gitignore:39:exports/`）。**仍存的一处缺口**：`.env.example` 里有 `STORAGE_DIR`，**却没有 `EXPORT_TEMP_DIR`**（下面第 ① 步漏了一半）——列入 **T09**。**判据**：跑一次上传 + 一次导出后 `git status --short` 必须只显示源码改动；出现 `uploads/…` 或 `exports/…` 即为漏登记。
 - `application-prod.yml`（T14 交付）**不允许出现任何 `${KEY:默认值}`**，一律 `${KEY}`——生产环境缺配置必须启动失败，而不是静默降级到本地默认值。
 
 ---
@@ -1507,6 +1611,7 @@ spring:
 | MySQL 当队列用，`SKIP LOCKED` 依赖 MySQL 8 | 无法在 MySQL 5.7 运行 | `pom`/README 明确要求 MySQL 8.0+ |
 | 长文档（>200 页）章节切分过粗 | 单次 prompt 超窗 | `DocService` 二次切分：超 6000 字 section 按段落切块并加 `chunk_index` |
 | 模型输出中文用例质量波动 | 采纳率不稳定 | 模板内置 3 条 few-shot；`temperature=0.4`；指标看板按 `prompt_version` 分组对比，用数据驱动改模板 |
+| **业务单号不是"序列"，是"播种 + 撞键重试"**（`IdGen`，见 §11.1 D-17） | ① 多实例/重启后的**首个**号一定撞一次键才收敛（多一次 `INSERT` 往返）；② 号码**不保证全局单调**——两个实例可能各拿到相邻号再靠重试错开，导出文件里单号大小与实际创建顺序可能不一致；③ 单日同一前缀 99.9 万次写入是硬上限 | **这是刻意的"不做什么"**：真正的序列要 `SELECT ... FOR UPDATE` 锁行或独立号段表，等于给每次创建都加一把跨实例的锁，而本项目单机部署、日写入量级在千级，**不值得**。明确写在 §9 而不是留给后人猜：**一旦要上多实例，必须换成 DB 序列表（或 Redis `INCR` 号段），届时回改 §8.2 并把上面三条一并删掉** |
 
 ---
 
@@ -1525,7 +1630,8 @@ spring:
 | 是否引入了 PRD 之外的功能 | ✅ 未引入；仅新增 `system/dict` 只读接口（服务前端枚举，属必要基础设施） |
 | 是否引入 Redis/MQ/外部中间件 | ✅ 无。队列=MySQL 表，推送=SSE，缓存=进程内 |
 | 指标口径是否可被 SQL 直接验证 | ✅ §8.3 全部为 `count`/`sum` 表达式，无模糊表述 |
-| 实施偏差是否留档 | ✅ §11 逐项记录 **17 条**偏差（D-01~D-17：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、2 个文档表格与配置漂移、1 个时区配置不足、1 个运行期可选依赖、1 个枚举单一真源收敛、1 个字典归属调整、1 个时间列默认值方案定稿并修正前条错误结论、1 个业务单号分配机制由「撞库兜底」改为「播种+重试」） |
+| 实施偏差是否留档 | ✅ §11 逐项记录 **20 条**偏差（D-01~D-20：6 个设计缺口补字段/文件、1 个设计阶段版本错误、1 个环境适配、1 个类型精度对齐、1 个职责倒挂调整、2 个文档表格与配置漂移、1 个时区配置不足、1 个运行期可选依赖、1 个枚举单一真源收敛、1 个字典归属调整、1 个时间列默认值方案定稿并修正前条错误结论、1 个业务单号分配机制由「撞库兜底」改为「播种+重试」、1 个测试环境方言差异（H2 不可替代真实 MySQL 的场景）、1 个落盘目录从 tmpdir 改为可配置持久目录、1 个运行时产物目录与 `.gitignore` 的联动规则） |
+| 验收条目的隐性依赖是否显式登记 | ✅ §12 登记 **36 条**依赖（约束 10 / 口径 11 / 前置条件 15）。其中 **15 条属「前置条件」类**——依赖不成立时条目不会红、只会测到别的东西（如断言 `created_at` 测的是 JVM 时钟而非会话时区、并发测试迁到 H2 得到假绿灯）。这类条目是本章最需要留痕的部分，因为失败方式是"静默通过"而不是"失败" |
 
 ---
 
@@ -1549,16 +1655,20 @@ spring:
 | **D-08** | `V1__schema.sql` / `V2__dict_and_config.sql` 的布尔型列 | 草稿口径写作 `TINYINT(1)` | 全库 **8 个**布尔列统一写作 `TINYINT`，`TINYINT(1)` 出现 **0 次**：`enabled` ×4（`app_user` / `model_price` / `reject_reason` / `failure_category`）、`deleted` ×1、`is_active` ×1、`degraded` ×2 | MySQL 8.0.17 起**显示宽度对整数类型已废弃**，8.0.19+ 写 `TINYINT(1)` 会告警并被改写；`(1)` 与 `(4)` 存储完全相同 | 无功能影响。§3.1 ER 用 `tinyint` 表述，与实际 DDL 一致。**唯一注意点**：MySQL Connector/J 仍会把 `TINYINT(1)` 优先映射为 `Boolean`，而 `TINYINT` 映射为 `Byte`/`Integer`——本项目实体统一用 `Integer`（0/1）而非 `Boolean`，避免"有人好心把 DDL 改成 `TINYINT(1)`、导致 DAO 反序列化炸掉" |
 | **D-09** | `backend/src/main/resources/application-prod.yml`<br/>同步 §2.2 | §2.2 目录树列出该文件（"真实 provider，密钥走环境变量"） | **T01 未创建，文件不存在**。由 **T14** 承接交付；§2.2 已标注「T14 交付：生产 profile，密钥全部走环境变量，禁止任何默认值兜底」 | T01 阶段创建它没有意义：T02 才引入鉴权配置、T04 才引入 provider 配置，此时写 prod profile 只能是空壳；而空壳文件最危险——它会让人误以为"生产配置已就绪" | 不影响本机与 dev 启动（`spring.profiles.active` 默认 `dev`）。**风险点**：若 T14 漏交付，生产环境会静默使用 dev 的默认值。缓解：T14 验收必须包含"`--spring.profiles.active=prod` 且不提供 `DB_PASSWORD` 时启动失败" |
 | **D-10** | `LlmCallLog` 实体归属<br/>同步 §2.2、§6 的 T04 / T07 / T11 | 实体 `metrics/domain/LlmCallLog.java` + `metrics/mapper/LlmCallLogMapper.java` 由 **T11** 创建；记账写在 T07 验收里 | 实体与 mapper 移至 **`aicore/log/`**、由 **T04** 交付；新增 `aicore/provider/LoggingLlmProvider`（**装饰器**包住真实 provider，成功与异常**都**写一条台账）。T07 验收⑤ 改为"验证装饰器被真实触发"，T11 只读聚合 | **职责倒挂 + 成环**。① 倒挂：台账是 AI 调用的副产物，`aicore` 若不负责记账就无法独立观测，成本也要等到 T11 才能验证；② 成环：T07 验收要求写台账，但 mapper 在 T11，而 T11 依赖 T07 → 给 T07 加 `→T11` 即环。装饰器还顺带统一了 mock 与真实 provider 的记账口径，避免两处各写一遍 | T11 的 `CostService` 改为读 `aicore/log/LlmCallLogMapper`（跨包只读，不反向依赖）；`llm_call_log` 表结构不变。**注意**：`aicore` 因此多了对 `llm_call_log` 表的依赖，但这仍是"基础设施"而非"业务模块"，不违反 §1.3 的单向依赖约束 |
-| **D-11** | §8.8「键名↔占位符对照表」<br/>（文档自身写错，代码为准） | 表中写 `AI_MODEL` → `${AI_MODEL:}`（缺省空串）；且**整表漏了 `SERVER_PORT` 这一行** | 按实际 `application.yml` 更正：`AI_MODEL` → `${AI_MODEL:mock-model}`；补 `SERVER_PORT` → `${SERVER_PORT:8080}` 一行，并附端口劫持的坑 | ① `V2__dict_and_config.sql` 的 `model_price` 种子里 mock 的 `model` 就是 **`mock-model`**（单价 0/0）。缺省空串会让 `llm_call_log.model = ''` 与 `model_price.model` 关联不上，成本恒为 0 且**分不清是"算对了"还是"没算"**；② 漏 `SERVER_PORT` 是 §11.1 D-07 那个端口劫持的直接诱因，最该写进共享知识的一条反而没写 | 仅文档。§8.8 对照表现在 **16 行覆盖 21 个真实占位符键**（`AI_TEMPERATURE_*` 三键合并为一行），与 `application.yml` 逐个核对一致（自查命令与期望输出见本表下方 §11.1 备注） |
+| **D-11** | §8.8「键名↔占位符对照表」<br/>（文档自身写错，代码为准） | 表中写 `AI_MODEL` → `${AI_MODEL:}`（缺省空串）；且**整表漏了 `SERVER_PORT` 这一行** | 按实际 `application.yml` 更正：`AI_MODEL` → `${AI_MODEL:mock-model}`；补 `SERVER_PORT` → `${SERVER_PORT:8080}` 一行，并附端口劫持的坑 | ① `V2__dict_and_config.sql` 的 `model_price` 种子里 mock 的 `model` 就是 **`mock-model`**（单价 0/0）。缺省空串会让 `llm_call_log.model = ''` 与 `model_price.model` 关联不上，成本恒为 0 且**分不清是"算对了"还是"没算"**；② 漏 `SERVER_PORT` 是 §11.1 D-07 那个端口劫持的直接诱因，最该写进共享知识的一条反而没写 | 仅文档。§8.8 对照表现在 **17 行覆盖 22 个真实占位符键**（`AI_TEMPERATURE_*` 三键合并为一行、`DB_*` 四键合并为一行），与 `application.yml` 逐个核对一致（自查命令与期望输出见本表下方 §11.1 备注） |
 | **D-12** | `application.yml` → JDBC URL<br/>同步 §3.2.1、§8.2 | §3.2.1 只写「JDBC URL 加 `serverTimezone=UTC`」，并断言这样就够了 | **不够。** 实配为 `serverTimezone=UTC&**connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true**`，并**配套**两件事：Jackson `spring.jackson.time-zone: UTC`、SQL 里一律 `UTC_TIMESTAMP(3)` 而非 `NOW(3)`。三者缺一，时区就会歪 | **`serverTimezone` 只是"告诉驱动怎么解读"，不是"命令服务端用哪个时区"。** MySQL 8 的 `serverTimezone` 已被 `connectionTimeZone` 取代（前者只是别名），且默认不改变会话时区——会话仍跟随 `@@global.time_zone`（本机实测为 `SYSTEM`，即东八区）。于是 `NOW(3)` 落库的是本地时间、`created_at DEFAULT CURRENT_TIMESTAMP` 也是本地时间，而 Java 侧按 UTC 解读 → **同一行数据被平移 8 小时**。`forceConnectionTimeZoneToSession=true` 才真正 `SET time_zone='+00:00'`。实测：`NOW(3)=11:31` vs `UTC_TIMESTAMP(3)=03:31`，差整 8 小时 | **必须两处同时锁**：连接（本行，唯一真源）+ 序列化（Jackson）。验收口径：`SELECT created_at, UTC_TIMESTAMP(3)` 两值之差 < 2 秒；前端显示 `2024-01-01T03:31:00.000Z` 而非 `11:31`。**最容易漏也最容易搞反的是 `DEFAULT CURRENT_TIMESTAMP`** —— 它由**会话**时区求值，所以只要连接层 ① 修好，V1 现有的 **25 处 `DEFAULT CURRENT_TIMESTAMP(3)` 与 9 处 `ON UPDATE CURRENT_TIMESTAMP(3)` 全部自动是 UTC，一个字都不用改**。**绝对不要把它们换成 `DEFAULT (UTC_TIMESTAMP(3))` 做"双重保险"**：`ON UPDATE` 子句语法上只接受 `CURRENT_TIMESTAMP`（换成表达式直接 `ERROR 1064`），于是"只换 DEFAULT"成了唯一改得动的方案，而它必然造成"插入写 UTC / 更新写会话"的双轨 —— 比不改更糟。**9 处 `ON UPDATE` 列在方案 A 下是安全的，不要动它们。**（我最初在本栏写成"必须改成 `DEFAULT (UTC_TIMESTAMP(3))`"，是错的，已由 D-16 推翻并留档） |
 | **D-13** | `backend/pom.xml` → `mybatis-plus-jsqlparser`<br/>同步 §7.1 | §7.1 依赖清单只有 `mybatis-plus-spring-boot3-starter` | 新增 **`com.baomidou:mybatis-plus-jsqlparser`**（版本由 MyBatis-Plus BOM 管理，不写死）。**IDE / `mvn dependency:analyze` 报「未使用」是误报，不许删** | MyBatis-Plus 3.5.9 起把 JSqlParser 拆成**可选依赖**（为了瘦身）。而分页插件 `PaginationInnerInterceptor` 在运行期要**靠它解析 SQL 才能改写 `LIMIT`**——编译期零引用，所以静态检查永远报「未使用」。删掉后的现象极具误导性：**编译通过、单测不涉及分页也全绿，一上分页接口就 `ClassNotFoundException: net.sf.jsqlparser...`** | 全部分页接口（§4.2 里所有 `?page=&size=` 的读接口）。验收：任一列表接口带 `page=2&size=10` 返回正确的第二页，且日志无 `NoClassDefFoundError` |
 | **D-14** | `common/enums/` 包<br/>同步 §2.2、§6 的 T03 | §2.2 在 `doc/domain/` 下写了 `DocType.java`，T03 文件清单也要求新建它 | **删除该条目。** 枚举统一收敛到 **`com.aittest.common.enums`**（T02 已交付 **12 个**：`CodedEnum` 接口 + `DocType` `ParseStatus` `TestPointStatus` `CaseType` `RiskLevel` `CaseStatus` `CasePriority` `TaskScene` `TaskStatus` `ExecutionStatus` `TriageSource`）。T03 **直接复用** `common.enums.DocType`，不新建 | **同名不同义最贵。** 若 T03 在 `doc/domain` 再建一个 `DocType`，T05/T08 里同时 import 两个同名类只是时间问题；两者一旦字段不同（比如一个带 `ext()` 白名单、一个不带），`42002` 扩展名校验就会在不同链路上表现不一致，而这种 bug **编译期不报错、只在特定入口复现**。统一到 `common/enums` 还有个附加收益：`CodedEnum` 强制 `code()/label()/sortNo()` 三件套，堵死"有人用 `ordinal()` 存库"——枚举顺序一调整，历史数据立刻错乱 | `common/enums` 成为**全项目唯一枚举真源**，业务包内**禁止**再建同义枚举。附带同步：`testpoint` 不建 `TestPointCategory`（复用 `CaseType`）、不建 `TestPointStatus`；`generation` 不建 `GenTaskStatus`（复用 `TaskStatus` / `TaskScene`）；`case` 的 `CaseStatus`、`execution` 的 `ExecutionStatus` 同理。原文「枚举写在各自 domain 包」的设计约定**作废** |
 | **D-15** | `system/` 包的职责<br/>同步 §2.2、§6 的 T02 / T08 / T10 | §2.2 的 `system/` 只有 `{HealthController, ConfigController, DictController}` 三个 controller；`RejectReason` 写在 `case/domain`，`FailureCategory` 写在 `execution/domain` | T02 实际交付 `system/` **10 个文件**：3 个 controller + `domain/{RejectReason,FailureCategory}` + `mapper/{RejectReasonMapper,FailureCategoryMapper}` + `service/{ConfigService,DictService}` + `dto/PublicConfigVO`。两个字典实体与 mapper 归 **`system`**，`case` / `execution` **只读引用，不再自建** | **字典是横切资源，不是某个业务模块的私产。** `reject_reason` 同时被 `case`（评审下拉）和 `metrics`（驳回原因归因）读，`failure_category` 同时被 `execution`（归因）和 `metrics`（失败分布）读——挂在任一业务包下都会让另一个包产生跨业务反向依赖，直接违反 §1.3 单向依赖约束。归到 `system`（基础设施层）后，业务模块与 `metrics` 都只是"读一张公共字典表"，依赖方向干净。`/api/dict/*` 与 `/api/config/public` 又必须在**鉴权白名单**内（否则登录页拿不到字典 → 拿不到字典就不能渲染 → 死锁），和字典归属同一处更便于集中维护白名单 | T08 / T10 的文件清单相应减项（不复建实体与 mapper）；§6 的 T02 文件清单补上这 4 个子包。**注意**：`LlmCallLog` 不在此列（见 D-10），它归 `aicore`，因为它是"AI 调用的副产物"而非"公共字典" |
 | **D-16** | 时间列默认值的取舍<br/>同步 §3.2.1、§8.2<br/>（**修正 D-12 的一处错误结论**） | D-12「影响范围」原写：`DEFAULT CURRENT_TIMESTAMP(3)` **由服务端求值、连接层改了也管不到**，因此建表时必须写成 `DEFAULT (UTC_TIMESTAMP(3))` | **结论被实测推翻，定稿方案 A：全表保持 `DEFAULT CURRENT_TIMESTAMP(3)`，零 DDL 改动，靠 `forceConnectionTimeZoneToSession=true` 把会话钉在 `+00:00`。** 另在 T13 ⑤ 加护栏断言 `SELECT @@session.time_zone = '+00:00'`（在应用实际连接上、且覆盖连接池重建后的首插） | **① `CURRENT_TIMESTAMP` 取的是【会话】时区，不是"服务端求值、与会话无关"。** 我独立复现（MySQL 8.0.45，探针表两列对照）：会话 `SYSTEM`(+08) 时 `DEFAULT CURRENT_TIMESTAMP(3)` 给 `11:42:40.228`、`DEFAULT (UTC_TIMESTAMP(3))` 给 `03:42:40.228`、真实 UTC 为 `03:42:40.231`；`SET time_zone='+00:00'` 后两列同为 `03:42:40.231`。**它明确跟着 `SET time_zone` 走** —— 所以连接层锁住会话，DDL 默认值就自动是 UTC。② **改成表达式默认值反而更危险**：`DEFAULT (UTC_TIMESTAMP(3))` 不受会话影响，但 `ON UPDATE CURRENT_TIMESTAMP(3)` **仍受**会话影响，MySQL 8 对 `DEFAULT (UTC_TIMESTAMP(3)) ON UPDATE CURRENT_TIMESTAMP(3)` **静默接受**。实测同表两列（会话 SYSTEM）：插入后都为 `03:42:44.493`；UPDATE 后 `a`（纯表达式默认）保持 `03:42:44.493`、而 `b`（带 ON UPDATE）跳到 `11:42:44.497`、真实 UTC `03:42:44.501` —— **同一行两列差 8 小时**。③ `ON UPDATE` 子句**语法上只接受 `CURRENT_TIMESTAMP[(fsp)]`**，不接受括号表达式（实测 `ON UPDATE (UTC_TIMESTAMP(3))` 与 `ON UPDATE UTC_TIMESTAMP(3)` 均 `ERROR 1064`），所以 `updated_at` 在语言层面**没有**"会话无关"写法——这也是"只换 DEFAULT"成为唯一改得动方案的原因，而它必然双轨。④ 两个附加代价：表达式默认值属非确定性函数，`binlog_format=STATEMENT` 时被判 unsafe（本机 `ROW`，无事，但生产改 STATEMENT 会告警）；且需 MySQL ≥ 8.0.13，T14 若落到 5.7/旧 MariaDB，`mysqldump` 恢复直接失败 | **V1 实际规模（我逐列数过，供 T14 评估兼容性）**：`DEFAULT CURRENT_TIMESTAMP(3)` 共 **25 处** = `created_at` 15 + `updated_at` 9 + 业务字段 `gen_task.next_run_at` 1；`ON UPDATE CURRENT_TIMESTAMP(3)` 出现在 **9 张表**。这意味着"半量换"的高危面是 9 张表的 `updated_at`，而"全量换"要动 24 个约定列 + 1 个业务列，且必须同时删光 9 处 `ON UPDATE` 改由 `MetaObjectHandler` 承担 —— 得不偿失。**硬约束**：今后任何人不得以"双重保险"为由把默认值改成表达式形式；若真要走方案 B，必须一次性全量替换。**9 处 `ON UPDATE CURRENT_TIMESTAMP(3)` 的列在方案 A 下是安全的**（会话锁 UTC 时与 `DEFAULT` 同源、同时刻取值），不要"顺手"改成 `(UTC_TIMESTAMP(3))` —— 语法上改不动（`ERROR 1064`），而一旦有人因此只改了 `DEFAULT` 那一半，就变成双轨。**单轨 vs 双轨的完整论证与「`UTC_TIMESTAMP(3)` 到底能用在哪」的用法区分，见 §3.2.1.1**：方案 A 下会话漂了两处一起漂（可被 `TimezoneIT` 抓住），混用方案下永远只漂一半、且两半各自自洽、断言抓不住。**方案 A 还有一个未被覆盖的缺口——绕过连接池的人工写库**（CLI / Navicat / 运维脚本默认会话 `SYSTEM(+08)`，`UPDATE` 会把 `updated_at` 写成本地时间，而 T13 ⑤ 只测应用连接、测不出来）。规范与自检 SQL 见 §3.2.1.2，承接 **T14 运行手册的「手工修数据」章节**。<br/>→ 已回改 §3.2.1（新增 §3.2.1.1、§3.2.1.2）、§8.2 |
-| **D-17** | `common/IdGen.java`<br/>新增 `config/IdGenSeederConfig.java`<br/>同步 §8.2 | §8.2 原写「日期 + 当日 6 位自增，**用 DB 唯一索引兜底冲突重试**」，代码注释写「调用方捕获唯一键冲突重试即可」 | **「撞库重试」不是分配机制，改成「播种 + 重试」**：① 计数器按 `前缀+日期` 隔离（原实现三个前缀共用 `currentDay`/`currentSeq` 两个字段，传 3 个文档后建任务会从 `T...000004` 起跳号）；② 新增 `SeqSeeder` 函数式接口 + `config/IdGenSeederConfig`，首次取号时用**裸 `JdbcTemplate`** 查该表当日 `MAX(序号)` 播种，**SQL 刻意不带 `deleted = 0`**；③ 撞键后 `nextAfterConflict` **重新播种**而非 `++`；④ `generateWithRetry(type, action)` 封装「取号→写库→撞键重播种」最多 3 次，耗尽抛 **40901**；⑤ 当日序号达 6 位上限也抛 40901（原实现无上限，`%06d` 到 7 位就破格式） | **实测复现**：旧实现重启后首次上传必撞 `uk_doc_source_doc_no`；软删行仍占号，而 MP 的 `BaseMapper` 会给查询自动注入 `deleted = 0`，用它播种必然偏小 → 热修等于没修（与 §3.2.2 `file_hash <> ''` 是同一类陷阱，故此处绕开 ORM）。**独立验收程序实跑 12 条断言全过**：前缀隔离 4 条、重启自愈 2 条、软删播种 2 条、多实例撞键重播种 4 条（真触发 `DuplicateKeyException`，日志 `WARN ... 第 1/3 次重试`，一次重试即收敛到 `库内最大值+1`）。**顺带修掉一处溢出**：原 `seed + 1 > SEQ_MAX` 在 `seed` 接近 `Integer.MAX_VALUE` 时溢出为负、判断恒不成立，会吐出负数序号；改为先比后加。**删掉 `seqPartOf` 死方法**（全仓无调用，且 Javadoc 称 `prefix.length() + DAY_LENGTH + 1`、实现写死 `1 + 8 + 1`，注释与代码自相矛盾）。**约束**：`generateWithRetry` 的 `action` 必须是独立事务边界——事务内抛 `DuplicateKeyException` 后 Spring 已标记 rollback-only，同事务重试必然继续失败，故调用点须在事务外或走 `REQUIRES_NEW` 代理方法 |
+| **D-17** | `common/IdGen.java`<br/>新增 `config/IdGenSeederConfig.java`<br/>同步 §8.2 | §8.2 原写「日期 + 当日 6 位自增，**用 DB 唯一索引兜底冲突重试**」，代码注释写「调用方捕获唯一键冲突重试即可」 | **「撞库重试」不是分配机制，改成「播种 + 重试」**：① 计数器按 `前缀+日期` 隔离（原实现三个前缀共用 `currentDay`/`currentSeq` 两个字段，传 3 个文档后建任务会从 `T...000004` 起跳号）；② 新增 `SeqSeeder` 函数式接口 + `config/IdGenSeederConfig`，首次取号时用**裸 `JdbcTemplate`** 查该表当日 `MAX(序号)` 播种，**SQL 刻意不带 `deleted = 0`**；③ 撞键后 `nextAfterConflict` **重新播种**而非 `++`；④ `generateWithRetry(type, action)` 封装「取号→写库→撞键重播种」最多 3 次，耗尽抛 **40901**；⑤ 当日序号达 6 位上限也抛 40901（原实现无上限，`%06d` 到 7 位就破格式） | **实测复现**：旧实现重启后首次上传必撞 `uk_doc_source_doc_no`；软删行仍占号，而 MP 的 `BaseMapper` 会给查询自动注入 `deleted = 0`，用它播种必然偏小 → 热修等于没修（与 §3.2.2 `file_hash <> ''` 是同一类陷阱，故此处绕开 ORM）。**独立验收程序实跑 12 条断言全过**：前缀隔离 4 条、重启自愈 2 条、软删播种 2 条、多实例撞键重播种 4 条（真触发 `DuplicateKeyException`，日志 `WARN ... 第 1/3 次重试`，一次重试即收敛到 `库内最大值+1`）。**顺带修掉一处溢出**：原 `seed + 1 > SEQ_MAX` 在 `seed` 接近 `Integer.MAX_VALUE` 时溢出为负、判断恒不成立，会吐出负数序号；改为先比后加。**删掉 `seqPartOf` 死方法**（全仓无调用，且 Javadoc 称 `prefix.length() + DAY_LENGTH + 1`、实现写死 `1 + 8 + 1`，注释与代码自相矛盾）。**约束**：`generateWithRetry` 的 `action` 必须是独立事务边界——事务内抛 `DuplicateKeyException` 后 Spring 已标记 rollback-only，同事务重试必然继续失败，故调用点须在事务外或走 `REQUIRES_NEW` 代理方法 | **全项目三处单号生成**（`doc_no` / `task_no` / `run_no`）。① `generateWithRetry` 的调用点**必须**落在事务外或 `REQUIRES_NEW` 代理内 —— 这是正确性前提，不是建议；② 播种查询刻意绕开 ORM，意味着**新增任何带单号的表都要在 `IdGenSeederConfig` 里登记一个 `SeqSeeder`**，漏登记的症状是"重启后首次创建 500、日志 40901/1062"，**不是编译错误**；③ 多实例下的固有限制（不保证全局单调、首号必撞一次）另见 §9「已知局限」 |
 
-**D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 21 个键一个不漏）：
+| **D-18** | `backend/src/test/resources/application-test.yml`<br/>同步 §6 的 T13 ⑤⑥、T14 ⑨ | §6 T13 的测试策略默认「集成测试用 H2 内存库，CI 友好、不依赖外网与本机 MySQL」 | **分工而不是二选一**：H2 只承接**纯解析单测**与 `ApiSmokeIT`（mock provider 全链路，不碰时区与并发认领）；**时区、行锁、DB 错误码映射、`sql_mode` 四类一律真实 MySQL**（`@Tag("mysql")` + `@EnabledIf` 判环境变量，**跳过时必须打 WARN 说明原因**） | **实测 H2 2.3.232（`MODE=MySQL`）的四个缺口**：① `SELECT @@session.time_zone` → 语法错误 `[42001-232]`，时区断言根本写不出来；② `UTC_TIMESTAMP(3)` → 函数不存在 `[90022-232]`，与 `CURRENT_TIMESTAMP(3)` 的无从对照；③ `FOR UPDATE SKIP LOCKED` **能执行但语义不同**——H2 2.x 对该语法标注 `@Deprecated`，含义是"加锁失败就静默跳过、不阻塞"，MySQL 是"跳过已被其它事务锁住的行、继续返回其余行"。于是"8 线程不重复消费同一 item"的并发测试在 H2 上**只能测得'没有报错'，测不出'没有重复'**，结果永远绿——**假绿灯比报错更贵**，因为它会被写进验收结论；④ `1406`/`1062` 的错误码在 H2 上取值不同，`DataIntegrityViolationException → 40004/40902` 的映射在 H2 上验不出来（验的是 H2 的码，不是 MySQL 的） | `application-test.yml` 继续保留 H2 供快速单测；`TimezoneIT`（T13 ⑤）与并发认领测试（T06 ②）必须指向真实 MySQL，无 MySQL 时**跳过并 WARN**，不许静默 skip（静默 skip 会把"没跑过"读成"跑过了"）。**不引入 Testcontainers 的理由**：本机第一次拉 `mysql:8` 镜像几百 MB，而 T01 ① 已要求本地必装 MySQL 8，复用本地实例零成本；代价是 CI 上这两组用例会被跳过——已用 WARN + §12 的依赖登记显式承接这个缺口，而不是假装覆盖了。→ 已回改 T13 ⑥、T14 ⑨ |
 
+| **D-19** | `application.yml` → `storage.dir`<br/>新增 `config/StorageProperties.java`<br/>同步 §8.8 ②、§2.2、§6 T03 | 设计只写到「落盘」这一步（§5.1 流程图有、`doc_source.storage_path` 有字段），**从未指定落盘根目录**；T03 初版实现落在 `java.io.tmpdir` | 新增 `config/StorageProperties`（`@ConfigurationProperties(prefix = "storage")`），`application.yml` 写 `storage.dir: ${STORAGE_DIR:uploads}`，`.env.example` 登记 `STORAGE_DIR=uploads`；实际按 `uploads/docs/yyyyMMdd/uuid.ext` 分层 | **`java.io.tmpdir` 会被系统清理**：Linux 的 `systemd-tmpfiles` 默认清理 `/tmp` 下长期未访问的文件，Windows 亦有清理策略。而 `doc_source.storage_path` 的语义是「原始文件可回溯、重解析不必让用户重传」（见 D-02）——放在 tmp 下演示没问题，但**只要机器重启或清理任务跑过一次，重解析就永久失败**，且现象是「文件不存在」，会被当成代码 bug 查很久。改成可配置持久目录 + 绝对路径归一化后，这个失败模式整个消失 | 重解析链路（`DocService.reparse()`）依赖它；T14 的 `reset-db.sh` 需明确「清库不清文件」还是两者都清。**`STORAGE_DIR` 是相对路径**（解析基准＝后端进程工作目录），踩坑说明见 §8.8「相对路径配置项的坑」 |
+| **D-20** | `.gitignore` → 运行时产物目录<br/>同步 §8.8 ③④ | 设计**未规定**「写盘类配置项」与 `.gitignore` 的联动 | 运行时区原有 `data/` `uploads/` `logs/`，**缺 `exports/`**（`EXPORT_TEMP_DIR` 的默认值）。本批补上 `exports/` 与两行注释，并在 §8.8 ③ 增第 ④ 步：**写盘类配置项（`*_DIR`）必须在同一个 commit 里把产物目录加进 `.gitignore`** | 缺 `exports/` 时导出功能**完全正常**——失败只发生在「有人执行 `git add .`」那一刻，而那次提交的信息通常与导出无关，review 时根本看不出 zip 是被谁带进来的；一旦入库，此后每次导出都产生 diff。**这是典型的「零测试可发现」缺陷**，只能靠规则 + 判据（跑完上传与导出后 `git status --short` 只应显示源码改动）来兜 | 已实测 `git check-ignore -v backend/exports/x.zip` → `.gitignore:39:exports/`。**顺带查出同类缺口**：`.env.example` 有 `STORAGE_DIR` 但**没有 `EXPORT_TEMP_DIR`**（§8.8 ③ 第 ① 步漏一半），已转 T09。→ 已回改 §8.8 ③（三步→四步）与硬约束 |
+
+**D-11 的自查命令**（新增/修改 §8.8 后跑一次，确认 **22** 个键一个不漏）：
 ```bash
 # 必须先滤掉注释行，否则会多出一个 ENV——
 # 那是 application.yml 第 3 行注释里讲解 ${ENV:默认值} 写法时出现的字面量，不是真占位符
@@ -1566,10 +1676,10 @@ grep -v '^\s*#' backend/src/main/resources/application.yml \
   | grep -oE '\$\{[A-Z_]+' | sed 's/\${//' | sort -u
 ```
 
-当前期望输出 **21** 个键（T02 后又新增 `AUTH_*` 2 个与 `EXPORT_*` 4 个）：
-`AI_API_KEY AI_BASE_URL AI_MODEL AI_PROVIDER AI_TEMPERATURE_GENERATE AI_TEMPERATURE_REPAIR AI_TEMPERATURE_TESTPOINT AI_TIMEOUT_SECONDS AUTH_TOKEN_SECRET AUTH_TOKEN_TTL_HOURS DB_HOST DB_NAME DB_PASSWORD DB_PORT DB_USERNAME EXPORT_JUNIT_PACKAGE EXPORT_JUNIT_TIMEOUT_SECONDS EXPORT_MAX_ROWS EXPORT_TEMP_DIR SERVER_PORT SPRING_PROFILES_ACTIVE`
+当前期望输出 **22** 个键（T02 新增 `AUTH_*` 2 个与 `EXPORT_*` 4 个，T03 新增 `STORAGE_DIR` 1 个）：
+`AI_API_KEY AI_BASE_URL AI_MODEL AI_PROVIDER AI_TEMPERATURE_GENERATE AI_TEMPERATURE_REPAIR AI_TEMPERATURE_TESTPOINT AI_TIMEOUT_SECONDS AUTH_TOKEN_SECRET AUTH_TOKEN_TTL_HOURS DB_HOST DB_NAME DB_PASSWORD DB_PORT DB_USERNAME EXPORT_JUNIT_PACKAGE EXPORT_JUNIT_TIMEOUT_SECONDS EXPORT_MAX_ROWS EXPORT_TEMP_DIR SERVER_PORT SPRING_PROFILES_ACTIVE STORAGE_DIR`
 
-> 对照表现在 **16 行覆盖 21 个键**（`AI_TEMPERATURE_*` 三键合一行）。
+> 对照表现在 **17 行覆盖 22 个键**（`AI_TEMPERATURE_*` 三键合一行、`DB_HOST/PORT/NAME/USERNAME` 四键合一行）。**加 `STORAGE_DIR` 时又验证了一次这张表的用途**：实现里先有了 `storage.dir: ${STORAGE_DIR:uploads}`，表里却没有——这类漏项不会报错，只会在下一个人配 `.env` 时被无声忽略。
 
 ### 11.2 一条与指令不符的说明（必须留痕）
 
@@ -1592,5 +1702,58 @@ grep -v '^\s*#' backend/src/main/resources/application.yml \
 3. 「原因」必须回答"如果不这么做会怎样"，而不是复述"做了什么"。
 4. 偏差若推翻了原设计的**结论**（而不只是细节），要同时回改对应章节正文，并在本节标注 `→ 已回改 §x.y`。
 5. 本节只增不改：已发生的偏差不因后来修好而删除，只在「影响范围」追加"已于 X 修复"。
+6. **追加/修改本节任一条后，必须去 §12 验收依赖索引搜一遍依赖对象名**（如 `D-16`）：偏差记录的结论一旦变了，挂在它上面的验收条目可能变成"测了个不成立的前提"，而那种失败**不会红**。
+
+---
+
+## 12. 验收依赖索引
+
+> **为什么单开一节**：验收条目写的是"要看到什么"，但很多条目背后压着一个**没有写进条目的前提**——某个口径、某个偏差记录、某个配置。前提一旦被人"顺手改好"，条目就会**以错误的方式变绿**（或红得莫名其妙，修的人去改测试而不是改实现）。这一节把隐性依赖显式登记：**改 §11 的某条、或改 §8 的某个口径之前，先查这张表，看会牵连哪些验收条目。**
+>
+> **依赖方式只有三个取值**，不要自创：
+> - **约束**：条目本身是"不许那么做"，依赖对象就是那条约束的出处。
+> - **口径**：条目的期望值/字段定义抄自依赖对象，对象改了口径，期望值必须同步改，否则断言是错的。
+> - **前置条件**：依赖对象不成立时，该条目**测不到它说要测的东西**（最危险的一类——它不会红，只会测了别的）。
+
+| 任务号 | 验收条目（摘要） | 依赖对象 | 依赖方式 | 若依赖对象失效的后果 |
+|---|---|---|---|---|
+| T01 | ② 建出 17 张表（15 业务 + 2 字典） | §3.1 ER、§11.2 三档表分类 | 口径 | 张数与文档不符时，后续 13 个任务全按错的表结构写代码。**注意**：数字 17 有两个来源（ER 图 / `V1__schema.sql`），改一处不改另一处就先红在 T01 ②，而不是红在真正错的地方 |
+| T01 | ③ `GET /api/health` 返回 `{code:0}` | §8.1 响应体（`data` 必须始终存在） | 口径 | `data` 被改成 `NON_NULL` 后 `code:0` 仍成立，但前端 `data.xxx` 抛 `TypeError`。本条**测不出**这个回归，只能靠 §8.1 的约定与 T02 ④ 兜 |
+| T02 | ① 三个 ★ 文件保留 T01 已有行为 | T01 交付物 | 前置条件 | 覆盖式重写后 T01 的 `X-Trace-Id` 回写静默消失，而 T02 自己的条目全绿 |
+| T02 | ⑤ Long 型 ID 序列化为字符串 | §8.2 主键约定 | 口径 | 去掉 `ToStringSerializer` 后前端 `typeof id === 'string'` 立刻红，属**可发现**；但如果同时改了前端 TS 类型为 `number`，两侧一起错、一起绿 |
+| T02 | ⑧ 字典与公开配置在鉴权白名单内 | §11.1 D-15（字典归属 `system`） | 约束 | 白名单漏登记 → 登录页拿不到字典 → 页面空白，且日志只有 `40101`，排查方向会先怀疑 token |
+| T02 | ⑨ 12 个枚举 `code()` 与 DDL 取值一一对应 | §11.1 D-14（枚举单一真源） | 约束 | 在业务包内另建同义枚举后，本条仍能通过（它只数 `common/enums`），而 `42002` 会在某些入口失效 |
+| T03 | ③ 非白名单扩展名返回 `42002` | §11.1 D-14（`DocType` 扩展名白名单） | 约束 | `DocService` 里再写一份 if-else → 两处白名单漂移，扩展名放行的入口不一致 |
+| T03 | ⑤ 同 `file_hash` 命中缓存返回 `reused:true` | §3.2.2 ①（`file_hash <> ''`） | 约束 | 去掉 `<> ''` 后空 hash 行互相命中，恢复逻辑把 A 的内容覆盖到 B 上**且不报错**；条目本身仍绿 |
+| T03 | ⑦ 软删后重传：`docId`/`doc_no` 不变、子表覆盖不追加 | §3.2.2 与 §4.2.1 四态去重矩阵 | 口径 | 若把 `PENDING` 纳入"可重复解析"，两个并发请求会互相删掉对方的子行；本条不覆盖 `PENDING`，靠 §4.2.1 的矩阵约束 |
+| T03 | ⑧ 会话时区由 DB 侧自证（禁断言 `created_at`） | §3.2.1.1 两个时间来源、§11.1 D-16 | 前置条件 | **这是本节存在的典型理由**：改成断言 `created_at` 后，会话漂成 `+08` 依然绿（因为 `created_at` 由 JVM 时钟写入），护栏名存实亡 |
+| T03 | 重解析直接读磁盘原始文件（不要求用户重传） | §11.1 D-19（`storage.dir` 持久落盘目录） | 前置条件 | 落在 `java.io.tmpdir` 时，机器重启或系统清理任务跑过一次后重解析**永久失败**，现象是「文件不存在」——会被当成代码 bug 查很久，而上传与首次解析**全程正常**，没有任何条目会红 |
+| T03 | ⑨ `TimezoneGuard` 启动自检 | §3.2.1.1 两条护栏、T14 ⑧（日志级别） | 前置条件 | 日志级别被调到 `error` 后 WARN 被吞，"有时区自检"退化为"有个类叫 TimezoneGuard"，且**没有任何条目会红** |
+| T04 | ② `api_key` 支持 `${ENV}` 占位、代码零写死 | §8.8 ② 键名 ↔ 占位符对照表 | 前置条件 | 新增配置项忘记登记对照表 → 缺省值静默生效（如 `AI_MODEL` 空串），`llm_call_log.model` 与 `model_price.model` 关联不上，**成本恒为 0 且分不清"算对了"还是"没算"** |
+| T04 | ⑦⑧ 每次调用（含异常）恰好 1 条台账、重试 `attempt_no` 递增 | §11.1 D-10（`LoggingLlmProvider` 装饰器） | 约束 | 记账逻辑漏到 T07 编排层后，mock 与真实 provider 各写一遍、口径分叉；T11 ③ "成本与台账求和完全相等"随即失去意义 |
+| T05 | ⑦ 抽点与用例生成共用异步引擎 | §9 决策 5 | 前置条件 | 改回同步接口后本条无从验收，且 T06 的 SSE/重试逻辑要写两遍 |
+| T06 | ② 8 个并发线程不重复消费同一 item | MySQL 8 行锁 + §11.1 D-18 | 前置条件 | 把这条并发测试迁到 H2 上，H2 的 `SKIP LOCKED` 语义是"失败即静默跳过" → **测不出重复**，永远绿。这是"假绿灯"最贵的一次 |
+| T06 | ⑧ 认领条件 `next_run_at <= #{nowUtc}`，SQL 内不求时间 | §3.2.1.1（JVM 时钟与会话时区是两个来源） | 约束 | 改回 `NOW(3)` 后，"写入用会话时区、比较用应用时钟"变成双轨，表现为**任务迟迟不被认领或一次认领过量，日志里看不出来** |
+| T06 | ⑨ `next_run_at` 每次写入显式赋值，断言**等于**注入的 `Clock` | §3.2.1「数据库时间」、⑧ | 口径 | 断言写成"接近当前时间"后，双轨下也能通过——与 T03 ⑧ 是同一类"测了个宽松到必然成立的条件" |
+| T06 | ⑩ `AuditMetaObjectHandler` 与 `IdGen` 注入同一个 `Clock` bean | §11.1 D-17（`IdGen` 热修） | 前置条件 | `Clock` 只注入给填充器、`IdGen` 仍用 `LocalDateTime.now()`，则 T06 ⑨ 的确定性断言覆盖不到单号生成里的日期前缀 |
+| T07 | ④ 部分 item 失败时任务终态是 `PARTIAL` 而非 `FAILED` | §3.3 三个核心状态机 | 口径 | 状态机新增状态后本条期望值不同步，就会出现"实现对了、测试红了"或反之 |
+| T08 | ② 驳回必须选字典原因码，不传返回 `40002` | §8.1 错误码表、§11.1 D-15 | 约束 | 若把驳回原因改成自由文本为主，T11 ② 的"按 code 聚合、未知归 `OTHER`"整条失效 |
+| T08 | ⑤ 同一用例多次评审只追加不覆盖 | §3.1 `case_review`（只追加表） | 口径 | 改成"就地更新"后，`old_content/new_content` 的 diff 能力与"当前状态取最后一条"同时崩 |
+| T09 | 导出产物落盘到 `EXPORT_TEMP_DIR`（默认 `exports`） | §8.8 ③ 第 ④ 步、§11.1 D-20 | 前置条件 | `.gitignore` 现缺 `exports/`。缺这一行时导出功能**照常成功**，只是产物出现在 `git status` 里，然后被 `git add .` 带进仓库——不会有任何测试变红 |
+| T11 | ① 采纳率口径（分母不含 `DRAFT`） | §8.3 指标口径（唯一真源） | 口径 | 两边口径分叉是本章最贵的漂移：文档 4/6、代码 4/10 时，看板"越生成越差"，却不报错 |
+| T11 | ⑦ 指标 SQL 在 `ONLY_FULL_GROUP_BY` 下直接可执行 | §8.2 `sql_mode` | 前置条件 | 用 `SET sql_mode=''` 绕过时，开发机绿、策略更严的托管实例报 `1055`；而本条若在关掉 `sql_mode` 的会话里验收，**同样绿** |
+| T12 | ④ 表格分页/排序/筛选与后端 `PageQuery` 严格对齐 | §8.1 `PageQuery` 截断（`size>100 → 100`） | 口径 | 前端按"传多少返多少"断言，后端截断到 100 → 前端看起来"少返了"，而 `total` 又是对的 |
+| T13 | ⑤(I) 会话被钉住（`@@session.time_zone='+00:00'`） | §3.2.1.1、§11.1 D-16 | 前置条件 | 只断言 `created_at` → 会话侧无人看管（同 T03 ⑧） |
+| T13 | ⑤(I)(b) 枚举所有 `DataSource` 且不得用 `JdbcTemplate` | §3.2.1.2（连接池占用） | 前置条件 | 用 `JdbcTemplate` 取连接会把池占满再向自己要连接，30s 后抛 `SQLTransientConnectionException` —— 测试以**与时区无关的异常**红掉，修的人会去查连接池 |
+| T13 | ⑤(II) 翻转 JVM 默认时区后 `created_at` 仍是 UTC | `AuditMetaObjectHandler` 的 `ZoneOffset.UTC` | 前置条件 | (I) 与 (II) 只做一条就是"换了个空洞"：(I) 管 DB 侧、(II) 管 JVM 侧，**互不替代** |
+| T13 | ⑤(III) 跳过必须 WARN，不许静默 skip | §11.1 D-18 | 约束 | 静默 skip 会让"测试是绿的"变成"根本没跑过"，而 CI 上恰好是它唯一会发生的事 |
+| T13 | ⑥ 时区与行锁用例不许切 H2 | §11.1 D-18 | 约束 | H2 缺 `@@session.time_zone` / `UTC_TIMESTAMP(3)`，且 `SKIP LOCKED` 语义不同 → 假绿灯 |
+| T14 | ⑥ `prod` profile 缺 `DB_PASSWORD` 必须启动失败 | §11.1 D-09（prod profile 由 T14 交付） | 前置条件 | 加了默认值兜底后本条会红，这是**设计意图**；但若把校验写成"启动打 WARN"，条目形同虚设 |
+| T14 | ⑦ 运行手册「手工修数据」一节 | §3.2.1.2、§11.1 D-16 | 约束 | 缺这一节，T13 ⑤ 的覆盖缺口（绕过连接池的写入）就彻底无人承接 |
+| T14 | ⑧ `root` 日志级别不得调到 WARN 以上 | T03 ⑨ `TimezoneGuard` | 前置条件 | 级别压掉后自检静默失效，且 T03 ⑨ 仍绿 |
+| T14 | ⑨ 运行手册「只能跑真实 MySQL」清单 | §11.1 D-18 | 口径 | 与 T13 ⑥ 同源：代码侧是约束、手册侧是给人看的，漏一处就会有人把并发测试搬回 H2 |
+| §9 已知局限 | 业务单号"播种 + 撞键重试"的上限 | §11.1 D-17、§8.2 | 口径 | 上多实例后若不回改 §8.2，单号不保证全局单调、首号必撞一次，而**没有任何验收条目会因多实例而红** |
+
+**维护规则**：新增/修改 §11.1 的任一偏差记录、或改动 §8.1/§8.2/§8.3 的任一约定后，先在本表搜依赖对象名（如 `D-16`、`§8.3`），把受影响的条目逐条复核一遍。**表里没有登记的依赖，视为不存在**——所以"我觉得这条不依赖任何东西"时，请回去读第三列的定义：多数时候它依赖的是**前置条件**，而不是某个具体的数。
 
 SELF_CHECK: PASS

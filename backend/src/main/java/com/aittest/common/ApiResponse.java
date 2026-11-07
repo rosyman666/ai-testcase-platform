@@ -1,6 +1,7 @@
 package com.aittest.common;
 
 import com.aittest.logging.TraceFilter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Getter;
 import lombok.ToString;
@@ -13,6 +14,15 @@ import org.slf4j.MDC;
  * 前端 axios 拦截器只按 {@code code} 判断；{@code message} 是可直接 toast 的中文文案，
  * 技术细节只进日志。</p>
  *
+ * <p><b>三条不可破坏的契约</b>（前端拦截器与排障依赖，改一处就会静默出错）：</p>
+ * <ol>
+ *   <li>{@code data} 字段必须**始终出现**（{@code @JsonInclude(ALWAYS)}），禁止改 NON_NULL——
+ *       前端靠"{@code data} 键是否存在"判断 schema，缺了会拿到 undefined 而不是 null；</li>
+ *   <li>{@code traceId} 取自 MDC，键名固定为 {@link TraceFilter#MDC_TRACE_ID}，
+ *       改名不会报错，只会让所有响应的 traceId 静默变成空串；</li>
+ *   <li>{@code code} 取值必须与 §8.1 错误码表一致（{@link ErrorCode} 是唯一真源，50000 仍是 50000）。</li>
+ * </ol>
+ *
  * @param <T> 业务数据类型
  * @author 寇豆码
  */
@@ -22,13 +32,13 @@ import org.slf4j.MDC;
 public class ApiResponse<T> {
 
     /** 成功码。 */
-    public static final int CODE_OK = 0;
+    public static final int CODE_OK = ErrorCode.OK.getCode();
 
     /** 成功提示文案。 */
-    public static final String MESSAGE_OK = "ok";
+    public static final String MESSAGE_OK = ErrorCode.OK.getMessage();
 
-    /** 未预期异常（T02 的错误码枚举会补齐全部码值）。 */
-    public static final int CODE_INTERNAL_ERROR = 50000;
+    /** 未预期异常的码值（保留常量名以兼容 T01 既有用法，取值从 ErrorCode 派生，数值仍为 50000）。 */
+    public static final int CODE_INTERNAL_ERROR = ErrorCode.E_INTERNAL.getCode();
 
     private final int code;
 
@@ -67,7 +77,7 @@ public class ApiResponse<T> {
     }
 
     /**
-     * 构造失败响应。
+     * 构造失败响应（裸码值）。
      *
      * @param code    错误码（非 0）
      * @param message 面向用户的中文提示
@@ -76,6 +86,58 @@ public class ApiResponse<T> {
      */
     public static <T> ApiResponse<T> fail(int code, String message) {
         return new ApiResponse<>(code, message, null, currentTraceId());
+    }
+
+    /**
+     * 构造失败响应（错误码枚举 + 默认文案）。
+     *
+     * @param errorCode 错误码枚举
+     * @param <T>       业务数据类型
+     * @return 失败响应
+     */
+    public static <T> ApiResponse<T> fail(ErrorCode errorCode) {
+        return fail(errorCode, errorCode.getMessage());
+    }
+
+    /**
+     * 构造失败响应（错误码枚举 + 自定义文案）。
+     *
+     * @param errorCode 错误码枚举
+     * @param message   面向用户的中文提示
+     * @param <T>       业务数据类型
+     * @return 失败响应
+     */
+    public static <T> ApiResponse<T> fail(ErrorCode errorCode, String message) {
+        return new ApiResponse<>(errorCode.getCode(), message, null, currentTraceId());
+    }
+
+    /**
+     * 构造失败响应（错误码枚举 + 自定义文案 + 附加数据）。
+     *
+     * <p>附加数据用于字段级校验错误等场景：{@code code} 仍表示失败，{@code data} 携带明细
+     * 供前端做内联提示；不要用它表达"部分成功"。</p>
+     *
+     * @param errorCode 错误码枚举
+     * @param message   面向用户的中文提示
+     * @param payload   附加数据，可为 null
+     * @param <T>       业务数据类型
+     * @return 失败响应
+     */
+    public static <T> ApiResponse<T> fail(ErrorCode errorCode, String message, T payload) {
+        return new ApiResponse<>(errorCode.getCode(), message, payload, currentTraceId());
+    }
+
+    /**
+     * 是否为成功响应。
+     *
+     * <p><b>必须加 {@code @JsonIgnore}</b>：Jackson 会把它当成 {@code success} 属性序列化出去，
+     * 从而破坏 §8.1 规定的四字段结构（多一个字段就可能让前端"严格校验 schema"的逻辑失效）。</p>
+     *
+     * @return {@code code == 0} 返回 true
+     */
+    @JsonIgnore
+    public boolean isSuccess() {
+        return this.code == CODE_OK;
     }
 
     /**

@@ -29,7 +29,12 @@ spring:
       - optional:file:../.env[.properties]
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:ai_testcase}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&zeroDateTimeBehavior=convertToNull"
+    # connectionTimeZone=UTC + forceConnectionTimeZoneToSession=true：
+    #   仅写 serverTimezone 只会影响驱动如何解读 DATETIME，不会改变会话时区；
+    #   而建表默认值 DEFAULT CURRENT_TIMESTAMP(3) 取的是**会话时区**时间。
+    #   两者叠加就会出现"应用写 UTC、DDL 默认值写本地 +8、读出来差 8 小时"的经典错位。
+    #   强制会话时区为 UTC 后，DDL 默认值与 MetaObjectHandler 填充值口径一致。
+    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:ai_testcase}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&zeroDateTimeBehavior=convertToNull"
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:}
     hikari:
@@ -101,6 +106,25 @@ ai:
   fallback:
     # 见架构文档 §8.7：禁止真实 provider 失败后自动降级到 mock（会污染评估数据）
     enabled: false
+
+# ---------------------------------------------------------------------------
+# 鉴权：无状态 HMAC token（见 auth/TokenService）
+#   secret 缺省空串 → 启动期生成一次性随机密钥（克隆即跑，但重启失效）
+#   生产必须通过 AUTH_TOKEN_SECRET 注入；绝不能在这里写默认密钥
+# ---------------------------------------------------------------------------
+auth:
+  token:
+    secret: ${AUTH_TOKEN_SECRET:}
+    ttl-hours: ${AUTH_TOKEN_TTL_HOURS:168}
+
+# ---------------------------------------------------------------------------
+# 导出限制（见 config/ExportProperties）
+# ---------------------------------------------------------------------------
+export:
+  max-rows: ${EXPORT_MAX_ROWS:5000}
+  temp-dir: ${EXPORT_TEMP_DIR:exports}
+  junit-package: ${EXPORT_JUNIT_PACKAGE:com.aittest.generated}
+  junit-timeout-seconds: ${EXPORT_JUNIT_TIMEOUT_SECONDS:30}
 
 # ---------------------------------------------------------------------------
 # 接口文档

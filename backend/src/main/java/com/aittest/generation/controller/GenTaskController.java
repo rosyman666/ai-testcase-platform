@@ -13,6 +13,7 @@ import com.aittest.generation.dto.GenTaskVO;
 import com.aittest.generation.service.GenTaskService;
 import com.aittest.generation.service.ProgressPublisher;
 import com.aittest.generation.service.SseEmitterRegistry;
+import com.aittest.generation.service.SseErrorResponder;
 import jakarta.validation.Valid;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -44,6 +45,15 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *
  * <p><b>响应一律显式 VO</b>（§4.4），不返回实体。</p>
  *
+ * <p><b>SSE 订阅失败不抛异常</b>（D-35，替代 D-29 的「无 token 必须 401」）：
+ * 本类声明了 {@code produces = text/event-stream}，{@code @RestControllerAdvice} 想吐 JSON
+ * 时会内容协商失败（{@code HttpMediaTypeNotAcceptableException}），客户端最终只看到
+ * <b>500 空 body</b>；而浏览器 {@code EventSource} 既带不了自定义 header、也读不到
+ * 非 200 响应的 body。所以 {@code stream()} 的显式契约是
+ * <b>HTTP 200 + {@code event: error} 帧</b>，统一交给
+ * {@link SseErrorResponder} 写出。响应体字段与 {@code ApiResponse} 完全一致，
+ * 前端按帧内 {@code code} 分支（40101 鉴权 / 40301 归属 / 40401 不存在）。</p>
+ *
  * @author 寇豆码
  */
 @RestController
@@ -60,14 +70,18 @@ public class GenTaskController {
 
     private final TokenService tokenService;
 
+    private final SseErrorResponder sseErrorResponder;
+
     public GenTaskController(GenTaskService genTaskService,
                              ProgressPublisher progressPublisher,
                              SseEmitterRegistry sseEmitterRegistry,
-                             TokenService tokenService) {
+                             TokenService tokenService,
+                             SseErrorResponder sseErrorResponder) {
         this.genTaskService = genTaskService;
         this.progressPublisher = progressPublisher;
         this.sseEmitterRegistry = sseEmitterRegistry;
         this.tokenService = tokenService;
+        this.sseErrorResponder = sseErrorResponder;
     }
 
     /**
@@ -134,26 +148,47 @@ public class GenTaskController {
      * {@code SseEmitterRegistry.TIMEOUT_MS}(30min)。这里只在终态分支提前关，
      * <b>正常执行中的订阅不受影响</b>。</p>
      *
+     * <p><b>三类拒绝都返回 HTTP 200 + {@code event: error} 帧，不抛异常</b>（D-35）：
+     * 缺 token（40101）/ 无权订阅他人任务（40301）/ 任务不存在（40401）。
+     * 拒绝路径上<b>绝不调用 {@code sseEmitterRegistry.register}</b>——emitter 一旦入表
+     * 却没返回给容器，三条清理回调永不触发，连接要挂满 30 分钟才被回收。</p>
+     *
+     * <p><b>为什么不抛 {@code BizException}</b>：本方法声明了
+     * {@code produces = text/event-stream}，异常处理器要吐 JSON 时内容协商失败 →
+     * {@code HttpMediaTypeNotAcceptableException}，客户端只看到 <b>500 空 body</b>，
+     * 分不清"没登录"和"服务崩了"；而 {@code EventSource} 也读不到非 200 的 body。
+     * 详见 {@link SseErrorResponder} 的类注释。</p>
+     *
      * @param id    任务 ID
      * @param token JWT（{@code EventSource} 带不了 header，只能走查询串）
-     * @return SSE 流
+     * @return SSE 流（失败时是一个只含单条 {@code error} 帧并已关流的流）
      */
     @GetMapping(value = "/{id}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@PathVariable("id") Long id,
                              @RequestParam(value = "token", required = false) String token) {
-        // 1) 鉴权：白名单路径上只有这里有用户身份。接住 verify 的返回值，不要丢掉。
+        // 1) 缺 token 短路：连验签都不做（先 verify 再判空是白跑一次 HMAC）。
+        //    返回 error 帧而不是抛异常，见方法注释的 D-35 说明。
         if (token == null || token.isBlank()) {
-            throw new BizException(ErrorCode.E_UNAUTHORIZED, "缺少 token，无法订阅任务进度");
+            return reject(id, ErrorCode.E_UNAUTHORIZED, "缺少 token，无法订阅任务进度");
         }
-        LoginUser user = tokenService.verify(token);
 
-        // 2) 任务存在性 + 归属校验
-        GenTask task = genTaskService.require(id);
-        if (task.getCreatedBy() != null && !task.getCreatedBy().equals(user.id())) {
-            throw new BizException(ErrorCode.E_FORBIDDEN, "无权订阅他人的任务进度");
+        // 2) 验签 + 任务存在性 + 归属校验。
+        //    这三步都抛 BizException（40102 / 40401 / 40301），统一在 catch 里翻成 error 帧，
+        //    保证"任何一处拒绝"都走同一个出口，不会漏掉某个分支又退回 500 空 body。
+        LoginUser user;
+        GenTask task;
+        try {
+            user = tokenService.verify(token);
+            task = genTaskService.require(id);
+            if (task.getCreatedBy() != null && !task.getCreatedBy().equals(user.id())) {
+                throw new BizException(ErrorCode.E_FORBIDDEN, "无权订阅他人的任务进度");
+            }
+        } catch (BizException ex) {
+            return reject(id, ex.getErrorCode(), ex.getMessage());
         }
 
         // 3) 全部校验通过：注册 emitter、推首帧快照、返回给容器
+        //    register 只出现在这一行之后 —— 拒绝路径上没有 emitter 入表。
         SseEmitter emitter = sseEmitterRegistry.register(id);
         progressPublisher.pushSnapshot(id);
 
@@ -165,6 +200,32 @@ public class GenTaskController {
         }
         log.debug("[SSE] 新订阅 taskId={} 用户={}", id, user.id());
         return emitter;
+    }
+
+    /**
+     * 把一次订阅拒绝写成 SSE 的 {@code error} 帧并关流（D-35）。
+     *
+     * <p><b>超时取 {@code 0L}</b>：反正写完立即 {@code complete()}，不超时就不会有
+     * 定时器白白挂着一个已死的连接。</p>
+     *
+     * <p><b>不复用注册表</b>：这个 emitter 从未进 {@code SseEmitterRegistry}，
+     * 由容器在本次请求的返回值处理里 {@code initialize} 后直接关掉。</p>
+     *
+     * @param id      任务 ID，仅用于日志
+     * @param code    业务错误码
+     * @param message 面向用户的中文提示
+     * @return 只含单条 {@code error} 帧、写完后立即关流的 emitter
+     */
+    private SseEmitter reject(Long id, ErrorCode code, String message) {
+        // 兜底：BizException 的 message 来自构造参数，理论上非空；真为空时退回错误码默认文案，
+        // 免得前端 toast 出一片空白。
+        String text = (message == null || message.isBlank()) ? code.getMessage() : message;
+        log.debug("[SSE] 订阅被拒，返回 error 帧 taskId={} code={} 原因={}",
+                id, code.getCode(), text);
+        // 0L = 不超时：立即关流，不需要 30min 超时兜底
+        SseEmitter rejected = new SseEmitter(0L);
+        sseErrorResponder.writeError(rejected, code, text);
+        return rejected;
     }
 
     /** 场景字符串 → 枚举，不认识的给 40001 而不是静默当默认值。 */

@@ -39,9 +39,12 @@ let redirecting = false;
 /**
  * token 失效的统一处置：清 token → 提示 → 跳登录（带回跳地址）。
  *
+ * **必须 export**：`sse.ts` 收到 40101/40102 的 error 帧时要复用同一个处置路径，
+ * 两个"token 失效出口"必须同源（§7.4 裁决）。
+ *
  * @param message 提示文案
  */
-function handleAuthExpired(message: string): void {
+export function handleAuthExpired(message: string): void {
   useAuthStore.getState().clear();
   if (redirecting || window.location.pathname === LOGIN_PATH) {
     return;

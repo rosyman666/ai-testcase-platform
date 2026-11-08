@@ -23,6 +23,10 @@ const DocDetailPage = lazy(() => import('@/pages/docs/DocDetail'));
 const PromptTemplateListPage = lazy(() => import('@/pages/prompts/PromptTemplateList'));
 // T05：测试点评审（按文档查看，所以路由带 docId）
 const TestPointReviewPage = lazy(() => import('@/pages/testpoints/TestPointReviewPage'));
+// T07-3+T08 前端合并批：任务 + 用例
+const TaskListPage = lazy(() => import('@/pages/tasks/TaskList'));
+const TaskDetailPage = lazy(() => import('@/pages/tasks/TaskDetail'));
+const CaseBoardPage = lazy(() => import('@/pages/cases/CaseBoard'));
 
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
@@ -112,6 +116,34 @@ export const router = createBrowserRouter([
         element: (
           <PageBoundary>
             <TestPointReviewPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T07-3 任务列表
+        path: '/tasks',
+        element: (
+          <PageBoundary>
+            <TaskListPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T07-3 任务详情
+        path: '/tasks/:id',
+        element: (
+          <PageBoundary>
+            <TaskDetailPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T08 用例看板：taskId 是筛选条件不是路径身份（可跨任务看），
+        // 与 /testpoints/:docId 的反例同理
+        path: '/cases',
+        element: (
+          <PageBoundary>
+            <CaseBoardPage />
           </PageBoundary>
         ),
       },

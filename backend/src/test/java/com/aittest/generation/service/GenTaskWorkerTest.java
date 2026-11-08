@@ -10,6 +10,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.aittest.aicore.LlmException;
+import com.aittest.common.ErrorCode;
 import com.aittest.common.enums.TaskScene;
 import com.aittest.common.enums.TaskStatus;
 import com.aittest.generation.domain.GenTask;
@@ -538,5 +540,74 @@ class GenTaskWorkerTest {
                 .filteredOn(v -> v instanceof String)
                 .map(String.class::cast)
                 .noneMatch(s -> s.contains("null"));
+    }
+
+    // ------------------------------------------------------------------
+    // T07-2 修复：模型调用失败必须保住 LlmException 的错误码
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T07-2 LlmException 透传：第 3 次失败 → item FAILED + error_code=E_LLM_UPSTREAM（不是 E_INTERNAL）")
+    void llmExceptionKeepsItsErrorCodeOnPermanentFailure() throws Exception {
+        // attempts 已到 2 → 本次是第 3 次，走 failPermanentlyWithOutcome
+        when(genTaskItemMapper.selectById(ITEM_ID)).thenReturn(newItem(2));
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "上游超时", true));
+        when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 1)));
+        when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
+                any(String.class), any(LocalDateTime.class))).thenReturn(1);
+
+        worker.run(ITEM_ID);
+
+        // ① item 终态 FAILED；② error_code 是 LlmException 的原码而不是 E_INTERNAL；
+        // ③ attempts=3（透传错误码**不影响**重试次数，retryable=false 也照旧重试 3 次）
+        ArgumentCaptor<Wrapper<GenTaskItem>> wrapper = updateWrapperCaptor();
+        verify(genTaskItemMapper).update(isNull(), wrapper.capture());
+        List<Object> values = setValues(wrapper.getValue());
+        assertThat(values).contains("FAILED", 3, "E_LLM_UPSTREAM", "上游超时");
+        assertThat(values).doesNotContain("E_INTERNAL");
+        // 到上限就不再安排重试
+        verify(genTaskItemMapper, never()).rescheduleForRetry(any(), any(Integer.class),
+                any(), any(), any());
+
+        // D-42 边界锁：**任务级** error_code 仍然恒 E_INTERNAL（本批明确不修，别顺手改）
+        verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.FAILED.code()),
+                eq("E_INTERNAL"), eq("有 1 条子项失败"), any(LocalDateTime.class));
+    }
+
+    @Test
+    @DisplayName("T07-2 LlmException 透传（退避路径）：第 1 次失败 → 重试行也记 E_LLM_UPSTREAM")
+    void llmExceptionKeepsItsErrorCodeOnRetryRow() throws Exception {
+        // 这条守的是"重试中的那两次也不能丢码"：t07degrade 若按 error_code 统计上游失败
+        // 次数，只有第 3 次是 E_LLM_UPSTREAM、前两次是 E_INTERNAL 的话，指标依然不可用
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "上游超时", true));
+
+        worker.run(ITEM_ID);
+
+        ArgumentCaptor<String> code = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(genTaskItemMapper).rescheduleForRetry(eq(ITEM_ID), eq(1),
+                any(LocalDateTime.class), code.capture(), msg.capture());
+        assertThat(code.getValue()).isEqualTo("E_LLM_UPSTREAM");
+        assertThat(msg.getValue()).isEqualTo("上游超时");
+        // 未到上限 → 不是 item 终态，不收尾
+        verify(genTaskMapper, never()).markTerminal(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("T07-2 回归：非 LlmException 的 RuntimeException 仍兜底成 E_INTERNAL（原宽 catch 行为不变）")
+    void runtimeExceptionStillFallsBackToInternal() throws Exception {
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenThrow(new IllegalStateException("CaseDraft 与 schema 字段漂移"));
+
+        worker.run(ITEM_ID);
+
+        ArgumentCaptor<String> code = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> msg = ArgumentCaptor.forClass(String.class);
+        verify(genTaskItemMapper).rescheduleForRetry(eq(ITEM_ID), eq(1),
+                any(LocalDateTime.class), code.capture(), msg.capture());
+        assertThat(code.getValue()).isEqualTo("E_INTERNAL");
+        assertThat(msg.getValue()).isEqualTo("CaseDraft 与 schema 字段漂移");
     }
 }

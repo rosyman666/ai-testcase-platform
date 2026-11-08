@@ -1,5 +1,6 @@
 package com.aittest.generation.service;
 
+import com.aittest.aicore.LlmException;
 import com.aittest.common.enums.TaskScene;
 import com.aittest.common.enums.TaskStatus;
 import com.aittest.generation.domain.GenTask;
@@ -139,6 +140,18 @@ public class GenTaskWorker {
         ItemOutcome outcome;
         try {
             outcome = handler.execute(task, item);
+        } catch (LlmException ex) {
+            // 模型调用类失败必须**保住错误码**：E_LLM_UPSTREAM / E_LLM_PARSE_EXHAUSTED /
+            // E_SCHEMA_INVALID 混成 E_INTERNAL 之后，"上游挂了"和"我们代码崩了"在库里长得一模一样，
+            // 排障只能靠翻日志。handler 有意不接 LlmException（见 CaseGenerateHandler 步骤 4），
+            // 所以这里是它唯一的落库出口——LlmException 的类注释早就预言过这个坑。
+            int latency = elapsedMs(startNanos);
+            log.warn("[TASK] 子项模型调用失败 taskNo={} unitRef={} code={} retryable={} 原因={}",
+                    task.getTaskNo(), item.getUnitRef(), ex.getErrorCode(), ex.isRetryable(),
+                    ex.getMessage());
+            // 注意：这里**不**用 isRetryable() 短路重试。retryable=false 也照旧退避重试 3 次
+            // （动它会改掉 T06 既有 NEG 断言的 attempts 口径），本批只改错误码归属。
+            outcome = ItemOutcome.failed(ex.getErrorCode().name(), ex.getMessage(), latency);
         } catch (Exception ex) {
             int latency = elapsedMs(startNanos);
             log.warn("[TASK] 子项执行抛异常 taskNo={} unitRef={} 原因={}",

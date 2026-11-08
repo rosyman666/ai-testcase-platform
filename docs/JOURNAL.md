@@ -451,7 +451,7 @@
 ### 新偏差（本轮验收抓出，明细见 §11.1 D-34~D-36）
 
 - **D-34（已修复 + 已压测验证）**：建任务子项插入的 InnoDB 死锁 —— `create()` 逐条 `insert`（60 条 = 60 个提交点）与 `claimBatch()` 在两张表上锁序交叉，实测修复前同一实例 **30 次建任务 2 次失败（≈6.7%）**。修复三件套（`TransactionTemplate` 独立事务 / `PessimisticLockingFailureException` 有界重试 / 去掉 `UPDATE` 子查询）后自然流量 19 次 0 失败、8×60 与 16×60（960 插入）压测全成功、死锁日志 0。
-- **D-35（未修，进 T07 首位）**：`@GetMapping(produces=text/event-stream)` 下异常响应内容协商失败 → 浏览器式 `Accept` 得到 **HTTP 500 + 空 body**，真实 `EventSource` 场景下 token 过期无法区分"鉴权失败"与"服务崩了"，且会无限重连。
+- **D-35（未修，进 T07 首位）**：`@GetMapping(produces=text/event-stream)` 下异常响应内容协商失败 → 浏览器式 `Accept` 得到 **HTTP 500 + 空 body**，真实 `EventSource` 场景下 token 过期拿不到 body、无法区分"鉴权失败"与"服务崩了"，服务端还会记 500 ERROR。（**更正**：原文写"会无限重连"未实测，按规范非 200 是 `fail the connection`，不重连。）
 - **D-36（观测项，未专门处理）**：修复后实例仍有 3 次 `Deadlock found` 落在 `INSERT INTO test_point`，由 item 级 `attempts` 重试吸收，未观察到任务失败。**不写成"已解决"。**
 
 ---

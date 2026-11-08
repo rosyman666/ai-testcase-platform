@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  test_case 的幂等写入语句。BaseMapper 拼不出 ON DUPLICATE KEY UPDATE，故必须手写。
+
+  ## 为什么不用 INSERT IGNORE
+  worker 在 attempts<3 时会重跑同一个 item，uk_test_case_item_seq(task_item_id, seq_no)
+  保证第二次执行必然撞键。IGNORE 会静默保留上一次的内容，于是「重试成功」与
+  「内容更新了」变成两件事，日志里没有任何线索。ON DUPLICATE KEY UPDATE 才是
+  「重新生成」该有的语义。
+
+  ## 更新列的三条边界
+  1. **不更新 status**：状态是评审产物（DRAFT/ACCEPTED/EDITED/REJECTED），
+     重新生成把 ACCEPTED 打回 DRAFT 等于丢评审结果。
+  2. **不更新 id / created_at**：它们是身份与出生时间。
+  3. **不更新 task_id / task_item_id / seq_no**：三者是唯一键的组成部分，
+     改它们等于换一条用例，不是「更新」。
+  updated_at 显式赋 CURRENT_TIMESTAMP(3)：若 update 的值与旧值完全相同，
+  MySQL 可能整行跳过更新，ON UPDATE 不触发，就看不出一条用例被重生成过。
+
+  ## 为什么用 VALUES(col) 而不是行别名（AS new）
+  VALUES() 在 MySQL 8.0.20+ 标记为 deprecated（仅告警，未移除），但兼容 8.0 全系与 5.7；
+  VALUES LIST 别名（INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE col = new.col）
+  需要 8.0.19+。本项目的目标库是 8.0.x，两者都能跑；选 VALUES() 是因为
+  「一次写 60 条、多行 VALUES LIST + 别名」的语法更绕，出错时更难读。
+-->
+<mapper namespace="com.aittest.testcase.mapper.TestCaseMapper">
+
+    <!-- 批量幂等写入：一条语句写完一批，避免上百次往返与反复加行锁（对比 D-34 的死锁） -->
+    <insert id="upsertBatch">
+        INSERT INTO test_case
+            (id, task_id, task_item_id, test_point_id, doc_id, seq_no,
+             title, precondition, steps, expected, priority, case_type,
+             status, confidence, prompt_version, model, content_hash)
+        VALUES
+        <foreach collection="cases" item="c" separator=",">
+            (#{c.id}, #{c.taskId}, #{c.taskItemId}, #{c.testPointId}, #{c.docId}, #{c.seqNo},
+             #{c.title}, #{c.precondition}, #{c.steps}, #{c.expected}, #{c.priority}, #{c.caseType},
+             #{c.status}, #{c.confidence}, #{c.promptVersion}, #{c.model}, #{c.contentHash})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+            title          = VALUES(title),
+            precondition   = VALUES(precondition),
+            steps          = VALUES(steps),
+            expected       = VALUES(expected),
+            priority       = VALUES(priority),
+            case_type      = VALUES(case_type),
+            confidence     = VALUES(confidence),
+            prompt_version = VALUES(prompt_version),
+            model          = VALUES(model),
+            content_hash   = VALUES(content_hash),
+            updated_at     = CURRENT_TIMESTAMP(3)
+    </insert>
+
+    <!-- 重跑后条数变少时清掉尾部残留。只按 task_item_id 删：
+         按 task_id 删会把同一任务下其它 item 的用例一起删掉 -->
+    <delete id="deleteStaleSeqNo">
+        DELETE FROM test_case
+         WHERE task_item_id = #{taskItemId}
+           AND seq_no &gt; #{keepSeqNo}
+    </delete>
+
+</mapper>

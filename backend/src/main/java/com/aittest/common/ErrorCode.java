@@ -88,6 +88,20 @@ public enum ErrorCode {
     /** JSON Schema 校验不通过。 */
     E_SCHEMA_INVALID(50005, "模型输出未通过结构校验", HttpStatus.OK),
 
+    /**
+     * 结构合法但产出为空（例如模型返回 {@code []}）。
+     *
+     * <p><b>为什么单独立码而不复用 {@code 40003 E_EMPTY_RESULT}</b>：{@code 4xxxx} 段表达的是
+     * "请求侧没有可处理的数据"，而这里是"请求完全正常、模型什么也没给"——把它归到 4xxxx
+     * 会让前端把上游问题显示成用户操作问题，也让"模型空产出"这一类在监控里消失。
+     * {@code 50001~50005} 已经按"模型输出"聚成一段，本码是同一族的第 6 个。</p>
+     *
+     * <p><b>可达性说明</b>：挂了 {@code testcase.schema.json} 时（{@code minItems: 1}）
+     * 空数组会先被判 {@code 50005}，本码只在<b>没有 schema 可校验</b>时才可能产出。
+     * 它保留的价值是兜底分支有明确归属，而不是把 0 条用例静默记成成功。</p>
+     */
+    E_LLM_EMPTY(50006, "模型未产出任何内容", HttpStatus.OK),
+
     /** 未预期异常。 */
     E_INTERNAL(50000, "系统内部错误，请稍后重试", HttpStatus.OK);
 

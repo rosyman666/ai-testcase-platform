@@ -2,6 +2,8 @@ package com.aittest.generation.support;
 
 import com.aittest.generation.domain.GenTask;
 import com.aittest.generation.domain.GenTaskItem;
+import com.aittest.testcase.domain.CaseReview;
+import com.aittest.testcase.domain.TestCase;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -35,11 +37,17 @@ public final class MybatisPlusLambdaCache {
     }
 
     /**
-     * 安装 {@link GenTask} / {@link GenTaskItem} 的 TableInfo 与 lambda 列缓存。
+     * 安装 {@link GenTask} / {@link GenTaskItem} / {@link TestCase} / {@link CaseReview}
+     * 的 TableInfo 与 lambda 列缓存。
      *
-     * <p>只注册这两个实体：本包单测里出现的 lambda wrapper 全部以它们为泛型，
-     * 其余 mapper（TestPoint / DocSource / ExtractPlanner）都是 mock，不会触发
-     * 真实的列解析。少注册实体也避免把无关实体的注解约束带进单测。</p>
+     * <p>只注册这四个实体：本包与 {@code testcase} 包的单测里出现的 lambda wrapper
+     * 全部以它们为泛型，其余 mapper（TestPoint / DocSource / ExtractPlanner /
+     * RejectReason）都是 mock，不会触发真实的列解析。少注册实体也避免把无关实体的
+     * 注解约束带进单测。</p>
+     *
+     * <p><b>T08 追加后两个</b>：{@code CaseReviewService} 锁用例行用
+     * {@code lambdaQuery().eq(TestCase::getId, ...).last("FOR UPDATE")}，批量评审用
+     * {@code lambdaUpdate().eq(CaseReview...)} 之外的条件更新，两者都要解析 lambda 列名。</p>
      */
     public static synchronized void install() {
         if (installed) {
@@ -49,6 +57,8 @@ public final class MybatisPlusLambdaCache {
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, "");
         installEntity(assistant, GenTask.class);
         installEntity(assistant, GenTaskItem.class);
+        installEntity(assistant, TestCase.class);
+        installEntity(assistant, CaseReview.class);
         installed = true;
     }
 

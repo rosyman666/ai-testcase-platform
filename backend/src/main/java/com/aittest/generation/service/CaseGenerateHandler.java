@@ -1,19 +1,7 @@
 package com.aittest.generation.service;
 
-import com.aittest.aicore.LlmMessage;
-import com.aittest.aicore.LlmRequest;
-import com.aittest.aicore.LlmResponse;
-import com.aittest.aicore.LlmUsage;
-import com.aittest.aicore.log.ModelPriceCache;
-import com.aittest.aicore.prompt.PromptRenderer;
 import com.aittest.aicore.prompt.PromptTemplate;
 import com.aittest.aicore.prompt.PromptTemplateService;
-import com.aittest.aicore.provider.LoggingLlmProvider;
-import com.aittest.aicore.structured.JsonSchemaValidator;
-import com.aittest.aicore.structured.StructuredOutputParser;
-import com.aittest.testcase.domain.TestCase;
-import com.aittest.testcase.dto.CaseDraft;
-import com.aittest.testcase.mapper.TestCaseMapper;
 import com.aittest.common.ErrorCode;
 import com.aittest.common.JsonUtils;
 import com.aittest.common.enums.CaseStatus;
@@ -26,12 +14,16 @@ import com.aittest.doc.mapper.ApiOperationMapper;
 import com.aittest.doc.mapper.DocSectionMapper;
 import com.aittest.generation.domain.GenTask;
 import com.aittest.generation.domain.GenTaskItem;
+import com.aittest.generation.orchestrator.CaseGenerateOrchestrator;
+import com.aittest.generation.orchestrator.GenerationContext;
+import com.aittest.generation.orchestrator.GenerationResult;
 import com.aittest.generation.service.TaskItemHandler.ItemOutcome;
+import com.aittest.testcase.domain.TestCase;
+import com.aittest.testcase.dto.CaseDraft;
+import com.aittest.testcase.mapper.TestCaseMapper;
 import com.aittest.testpoint.domain.TestPoint;
 import com.aittest.testpoint.mapper.TestPointMapper;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -41,7 +33,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -49,28 +40,30 @@ import org.springframework.stereotype.Service;
 /**
  * 用例生成场景的 item 执行器：**一个测试点 → 1~3 条用例落库**。
  *
- * <p><b>与抽点场景的分工</b>：引擎只知道"把 N 个 item 跑完"，本类只负责"这一个测试点展开成用例"。
- * 状态机、调度、退避、进度推送全在 {@code GenTaskWorker} / {@code GenTaskService}，
- * 本类<b>不重写其中任何一环</b>，也不碰 {@code onTaskFinalize}（用例生成没有文档级收尾动作）。</p>
+ * <p><b>本类只做 I/O，模型细节全部在编排层</b>（T07-2 的分层，用户已拍板）：</p>
+ * <ul>
+ *   <li><b>本类负责</b>：定位测试点、查接口/章节上下文、查 few-shot 素材 → 组装
+ *       {@link GenerationContext} → 调 {@link CaseGenerateOrchestrator} → 幂等 upsert + 裁尾 →
+ *       映射 {@link ItemOutcome}；</li>
+ *   <li><b>编排层负责</b>：渲染、调用、解析、返修、判定档位（NORMAL/REPAIRED/LENIENT）。</li>
+ * </ul>
+ * <p>边界这么切是因为"表结构/索引"和"模型输出长什么样"变更频率差一个量级：
+ * 混在一个方法里，改幂等口径要重读降级逻辑，改降级轮次要重读落库 SQL。</p>
+ *
+ * <p><b>落库口径留在本类，且只有本类知道</b>：</p>
+ * <ol>
+ *   <li><b>幂等</b>：{@code INSERT ... ON DUPLICATE KEY UPDATE}（撞 {@code uk_test_case_item_seq}），
+ *       更新列不含 {@code status}/{@code id}/{@code created_at}；</li>
+ *   <li><b>裁尾</b>：重跑条数变少时删 {@code seq_no > 本次条数}，只按 {@code task_item_id} 删；</li>
+ *   <li><b>置信度</b>：{@code NORMAL}/{@code REPAIRED} → {@code 1.000}，
+ *       {@code LENIENT} → {@code 0.500}（D-39 把它钉成"解析保真度"，<b>不是内容质量分</b>）；</li>
+ *   <li><b>{@code degraded} 标记</b>：只有宽松档置 1，靠 {@link ItemOutcome#degraded} 带出去。</li>
+ * </ol>
  *
  * <p><b>失败一律收成 {@link ItemOutcome#failed}</b>（D-27 的失败隔离纪律）：
  * "没关联测试点""测试点被别人删了""模型一条都没给"都是<b>预期内</b>的结果，
  * 抛异常只能表达"第一条失败"。真正的程序错误（NPE、schema 与 DTO 漂移）照旧抛出，
  * 由 worker 按退避重试 3 次后置 FAILED。</p>
- *
- * <p><b>指标必须真回写</b>（T07 验收②）：{@code promptTokens / completionTokens /
- * costMicro / latencyMs} 全部取自本次 {@link LlmResponse}。抽点侧这四个值恒传 0
- * 是历史遗留，<b>不要照抄</b>——那样"每个任务的成本、每个 item 的耗时"永远是 0，
- * 后面所有成本报表都是空的。</p>
- *
- * <p><b>已知边界（留 T07-2）</b>：</p>
- * <ol>
- *   <li><b>降级解析没有接进来</b>。{@code parsed.truncated()} 为真时按 D-03 本应
- *       {@code degraded=1} 且 {@code confidence=0.500}，但"三档降级编排"是 T07-2 的范围，
- *       本批只<b>打日志</b>不改语义。所以当前 {@code confidence} 恒 {@code 1.000}——
- *       这是已知偏差，不是漏写。</li>
- *   <li><b>few-shot 传空串</b>：素材库（按文档/分类挑历史已采纳用例）属于 T07-2。</li>
- * </ol>
  *
  * @author 寇豆码
  */
@@ -98,14 +91,33 @@ public class CaseGenerateHandler implements TaskItemHandler {
     private static final String PRIORITY_RULES = "P0/P1/P2/P3，按影响面与发生概率评定";
 
     /**
-     * 兜底置信度。
+     * few-shot 素材条数。
+     *
+     * <p>5 条是"够学到风格、又不至于挤掉本次任务说明"的经验值：每条渲染成一行（标题 + 预期），
+     * 5 行约 300 字；再多就变成"让模型模仿历史用例"而不是"针对这个测试点生成"。</p>
+     */
+    private static final int FEW_SHOT_LIMIT = 5;
+
+    /** 单条 few-shot 素材里"预期"字段的长度上限（{@code expected} 本身可到 1000 字）。 */
+    private static final int FEW_SHOT_TEXT_MAX = 200;
+
+    /**
+     * 正常档置信度（解析保真度 = 1.000）。
      *
      * <p><b>为什么是常量而不是"模型给的值"</b>：{@code schema/testcase.schema.json} 里
      * 没有 {@code confidence} 字段且 {@code additionalProperties: false}，
-     * 模型<b>写不出</b>置信度（写了会被 schema 拒掉）。所以这里只能由服务端定：
-     * 正常解析 1.000，降级解析 0.500（降级分支留 T07-2，见类注释）。</p>
+     * 模型<b>写不出</b>置信度（写了会被 schema 拒掉）。所以只能由服务端按档位定。</p>
      */
     private static final BigDecimal CONFIDENCE_NORMAL = new BigDecimal("1.000");
+
+    /**
+     * 宽松档置信度（解析保真度 = 0.500）。
+     *
+     * <p>含义是"这条用例来自元素级打捞，可能缺字段或与兄弟条目不齐"，<b>不是"内容质量差"</b>——
+     * 内容好坏只能由人工评审（{@code status}）表达。任何拿 {@code confidence} 排序展示的逻辑
+     * 都是误用（D-39）。</p>
+     */
+    private static final BigDecimal CONFIDENCE_LENIENT = new BigDecimal("0.500");
 
     /** 测试点定位（读 {@code test_point}）。 */
     private final TestPointMapper testPointMapper;
@@ -116,57 +128,37 @@ public class CaseGenerateHandler implements TaskItemHandler {
     /** 章节上下文（{@code test_point.section_id} → 标题 + 正文摘要）。 */
     private final DocSectionMapper docSectionMapper;
 
-    /** 用例落库（幂等写入）。 */
+    /** 用例落库（幂等写入）与 few-shot 素材查询。 */
     private final TestCaseMapper testCaseMapper;
 
-    /** 模板查询。 */
+    /** 模板查询（只为拿 {@code promptVersion} 落库；渲染与 schema 由编排层自己查）。 */
     private final PromptTemplateService promptTemplateService;
 
-    /** 提示词渲染。 */
-    private final PromptRenderer promptRenderer;
+    /** 编排层（渲染 → 调用 → 解析 → 返修 → 定档）。 */
+    private final CaseGenerateOrchestrator caseGenerateOrchestrator;
 
-    /** 记账装饰器（必须走它，否则生成不进成本台账）。 */
-    private final LoggingLlmProvider loggingLlmProvider;
-
-    /** schema 读取与校验。 */
-    private final JsonSchemaValidator jsonSchemaValidator;
-
-    /** 结构化解析（修复 → 解包 → 校验）。 */
-    private final StructuredOutputParser structuredOutputParser;
-
-    /** JSON 转换（把校验通过的节点映射成 {@link CaseDraft}，以及把 steps 拼成 JSON 数组）。 */
+    /** JSON 转换（steps 拼成 JSON 数组）。 */
     private final ObjectMapper objectMapper;
 
-    /** 温度配置（生成 0.4）。 */
+    /** 模型名兜底（任务没指定时用全局配置）。 */
     private final AiProperties aiProperties;
-
-    /** 成本换算（token → 微元）。 */
-    private final ModelPriceCache modelPriceCache;
 
     public CaseGenerateHandler(TestPointMapper testPointMapper,
                                ApiOperationMapper apiOperationMapper,
                                DocSectionMapper docSectionMapper,
                                TestCaseMapper testCaseMapper,
                                PromptTemplateService promptTemplateService,
-                               PromptRenderer promptRenderer,
-                               LoggingLlmProvider loggingLlmProvider,
-                               JsonSchemaValidator jsonSchemaValidator,
-                               StructuredOutputParser structuredOutputParser,
+                               CaseGenerateOrchestrator caseGenerateOrchestrator,
                                ObjectMapper objectMapper,
-                               AiProperties aiProperties,
-                               ModelPriceCache modelPriceCache) {
+                               AiProperties aiProperties) {
         this.testPointMapper = testPointMapper;
         this.apiOperationMapper = apiOperationMapper;
         this.docSectionMapper = docSectionMapper;
         this.testCaseMapper = testCaseMapper;
         this.promptTemplateService = promptTemplateService;
-        this.promptRenderer = promptRenderer;
-        this.loggingLlmProvider = loggingLlmProvider;
-        this.jsonSchemaValidator = jsonSchemaValidator;
-        this.structuredOutputParser = structuredOutputParser;
+        this.caseGenerateOrchestrator = caseGenerateOrchestrator;
         this.objectMapper = objectMapper;
         this.aiProperties = aiProperties;
-        this.modelPriceCache = modelPriceCache;
     }
 
     /**
@@ -182,9 +174,8 @@ public class CaseGenerateHandler implements TaskItemHandler {
     /**
      * 把一个测试点展开成 1~3 条用例并落库。
      *
-     * <p><b>执行顺序</b>：定位测试点 → 取模板与版本 → 渲染（5 个占位符必须全给，
-     * 缺一个 {@code PromptRenderer} 会抛 40001）→ 调模型（带任务上下文与真实 attemptNo）
-     * → 解析 + schema 校验 → 幂等落库（先 upsert 再删多余序号）→ 回写指标。</p>
+     * <p><b>执行顺序</b>：定位测试点 → 取模板版本（落库用）→ 查上下文与素材 → 组装上下文
+     * → 交给编排层 → 空产出判定 → 幂等落库（先 upsert 再删多余序号）→ 回写指标与档位。</p>
      *
      * @param task 所属任务（提供 docId、taskId、model 兜底）
      * @param item 待执行的子项（提供 taskItemId、attempts、测试点定位）
@@ -203,102 +194,83 @@ public class CaseGenerateHandler implements TaskItemHandler {
             return ItemOutcome.failed("E_NOT_FOUND", "测试点不存在：" + testPointId, 0);
         }
 
-        // 2) 模板与版本。版本号必须在这里记下：模板改版后老用例的这个字段不能跟着变
+        // 2) 模板版本。必须在这里落定：模板改版后老用例的这个字段不能跟着变。
+        //    （内容与 schema 由编排层再查一次——它要按同一套规则决定"用哪个模板渲染"，
+        //    让 handler 传 schema 会出现"handler 按 A 取 schema、编排层按 B 渲染"的错配。）
         PromptTemplate template = promptTemplateService.activeOf(TEMPLATE_CODE);
-        String schemaPath = template.getOutputSchema();
         String promptVersion = template.getCode() + ".v" + template.getVersion();
 
-        // 3) 渲染。5 个占位符一个都不能缺（缺了 PromptRenderer 直接 40001），
-        //    没有内容的一律传空串而不是 null（Map.of 也不接受 null）。
-        String rendered = promptRenderer.render(template.getContent(), Map.of(
-                "test_point", testPointTextOf(testPoint),
-                "api_spec", apiSpecOf(testPoint),
-                "case_types", allowedCaseTypes(),
-                "priority_rules", PRIORITY_RULES,
-                "few_shot", ""));
+        // 3) 组装纯输入：本类把该查的库全查完，编排层拿到的只有字符串与 id
+        GenerationContext context = new GenerationContext(
+                task.getId(),
+                item.getId(),
+                task.getDocId(),
+                testPoint.getId(),
+                attemptNoOf(item),
+                promptVersion,
+                testPointTextOf(testPoint),
+                apiSpecOf(testPoint),
+                allowedCaseTypes(),
+                PRIORITY_RULES,
+                fewShotOf(task.getDocId()));
 
-        // 4) 调模型。attemptNo 跟着 item 的重试次数走：llm_call_log 靠它算首次通过率，
-        //    恒传 1 会把"重试 3 次才成功"记成"一次就成功"（抽点侧的已知偏差，不要复制）。
-        LlmRequest request = LlmRequest.builder()
-                .scene(TaskScene.CASE_GENERATE.code())
-                .taskId(task.getId())
-                .taskItemId(item.getId())
-                .attemptNo(attemptNoOf(item))
-                .message(LlmMessage.user(rendered))
-                .temperature(aiProperties.getTemperature().getGenerate())
-                .jsonSchema(schemaPath == null || schemaPath.isBlank()
-                        ? null
-                        : jsonSchemaValidator.readSchemaText(schemaPath))
-                .build();
+        // 4) 编排层：三档降级在这里面。LlmException 不接，交给 worker 退避重试
+        GenerationResult result = caseGenerateOrchestrator.generate(context);
 
-        LlmResponse response = loggingLlmProvider.chat(request);
-        int latencyMs = latencyMsOf(response);
-
-        // 5) 解析 + schema 校验。LlmException 不在这里接：模型/上游类失败应当让 worker
-        //    按退避重试（3 次后置 FAILED），而不是"一次失败就定终身"。
-        StructuredOutputParser.ParseResult parsed =
-                structuredOutputParser.parseArrayWithMeta(response.getContent(), schemaPath);
-        List<CaseDraft> drafts = toDrafts(parsed.items());
-
-        if (parsed.truncated()) {
-            // D-03：截断补全属于降级解析，本应 degraded=1 + confidence=0.500。
-            // 三档降级编排留 T07-2，这里只留痕，便于事后按日志找出"疑似低质批"。
-            log.warn("[CASE] 模型输出被截断并补全，按 NORMAL 记置信度（降级编排待 T07-2）itemId={}",
-                    item.getId());
+        // 5) 一条都没有：不算成功。返回 0 会让任务看起来"跑完了但没产出"
+        if (result.drafts().isEmpty()) {
+            return emptyOutcome(item, testPointId, result);
         }
 
-        // 6) 一条都没有：不算成功。返回 0 会让任务看起来"跑完了但没产出"，
-        //    而真实原因是模型没给东西，必须显式失败。
-        //    错误码取枚举 name() 而不是字符串字面量：改名时跟着走，不会出现"枚举叫 A、库里存 B"。
-        if (drafts.isEmpty()) {
-            log.warn("[CASE] 模型未产出任何用例 itemId={} testPointId={}", item.getId(), testPointId);
-            return ItemOutcome.failed(ErrorCode.E_LLM_EMPTY.name(), "模型未产出任何用例", latencyMs);
-        }
-
-        // 7) 幂等落库：先 upsert 覆盖，再删本次 item 的多余序号
-        String model = resolveModel(task, response);
-        List<TestCase> rows = toRows(task, item, testPoint, drafts, promptVersion, model);
+        // 6) 幂等落库：先 upsert 覆盖，再删本次 item 的多余序号
+        BigDecimal confidence = result.lenient() ? CONFIDENCE_LENIENT : CONFIDENCE_NORMAL;
+        List<TestCase> rows = toRows(task, item, testPoint, result.drafts(), promptVersion,
+                resolveModel(task), confidence);
         testCaseMapper.upsertBatch(rows);
         int trimmed = testCaseMapper.deleteStaleSeqNo(item.getId(), rows.size());
 
-        // 8) 指标真回写（不要像抽点侧那样全传 0）
-        LlmUsage usage = response.getUsage() == null ? LlmUsage.EMPTY : response.getUsage();
-        int promptTokens = usage.promptTokens();
-        int completionTokens = usage.completionTokens();
-        long costMicro = costMicroOf(response, usage);
-
         log.info("[CASE] 生成完成 taskNo={} itemId={} 测试点={} 用例={} 清理残留={} 版本={} 模型={} "
-                        + "tokens={}/{} 成本={}μ 耗时={}ms",
+                        + "档位={} 返修轮次={} tokens={}/{} 成本={}μ 耗时={}ms",
                 task.getTaskNo(), item.getId(), testPointId, rows.size(), trimmed,
-                promptVersion, model, promptTokens, completionTokens, costMicro, latencyMs);
-        return ItemOutcome.ok(rows.size(), promptTokens, completionTokens, costMicro, latencyMs);
+                promptVersion, rows.get(0).getModel(), result.level(), result.repairRounds(),
+                result.promptTokens(), result.completionTokens(), result.costMicro(), result.latencyMs());
+
+        // 7) 指标真回写（不要像抽点侧那样全传 0）；宽松档必须置 degraded=1
+        if (result.lenient()) {
+            return ItemOutcome.degraded(rows.size(), result.promptTokens(), result.completionTokens(),
+                    result.costMicro(), result.latencyMs());
+        }
+        return ItemOutcome.ok(rows.size(), result.promptTokens(), result.completionTokens(),
+                result.costMicro(), result.latencyMs());
     }
+
+    // ------------------------------------------------------------------ 失败/空产出
 
     /**
-     * 解析出的 JSON 数组 → {@link CaseDraft} 列表。
+     * 草稿为空时的结果：<b>宽松档与正常档的错误码不同</b>。
      *
-     * <p><b>映射失败按程序错误抛出，不当成"这次没生成"</b>：走到这里节点已经通过
-     * {@code schema/testcase.schema.json} 校验，再映射不上只有一种可能——
-     * {@link CaseDraft} 与 schema 字段漂移了（改了其中一个没改另一个）。
-     * 静默吞掉会让 schema 形同虚设，还会让"模型质量差"变成背锅侠。</p>
+     * <p>宽松档为空说明"三档全走完仍然一条都救不回来"，根因是<b>结构不合规</b>
+     * （{@code E_SCHEMA_INVALID}）；正常档为空说明模型给了一个合法但空的数组，
+     * 根因是<b>没产出</b>（{@code E_LLM_EMPTY}）。两者混用会把"模型输出坏"记成"模型没说话"，
+     * 排障方向直接跑偏（前者要改提示词/schema，后者要查接口是不是没上下文）。</p>
      *
-     * @param items 已通过 schema 校验的数组
-     * @return draft 列表（与 items 等长，可能为空数组）
-     * @throws IllegalStateException {@link CaseDraft} 与 schema 字段漂移
+     * @param item        本次子项
+     * @param testPointId 测试点 ID（日志用）
+     * @param result      编排层结果
+     * @return 失败结果（带真实耗时，便于区分"模型慢"与"模型没给"）
      */
-    private List<CaseDraft> toDrafts(ArrayNode items) {
-        List<CaseDraft> drafts = new ArrayList<>(items.size());
-        for (JsonNode node : items) {
-            try {
-                drafts.add(objectMapper.treeToValue(node, CaseDraft.class));
-            } catch (JsonProcessingException ex) {
-                throw new IllegalStateException(
-                        "CaseDraft 与 schema/testcase.schema.json 字段漂移，无法把模型输出映射成用例："
-                                + ex.getOriginalMessage(), ex);
-            }
+    private ItemOutcome emptyOutcome(GenTaskItem item, Long testPointId, GenerationResult result) {
+        log.warn("[CASE] 无可落库用例 itemId={} 测试点={} 档位={} 截断={} 返修轮次={} 原因={}",
+                item.getId(), testPointId, result.level(), result.truncated(),
+                result.repairRounds(), result.degradeReason());
+        if (result.lenient()) {
+            return ItemOutcome.failed(ErrorCode.E_SCHEMA_INVALID.name(),
+                    "模型输出不合规，宽松解析后仍无可保留的用例", result.latencyMs());
         }
-        return drafts;
+        return ItemOutcome.failed(ErrorCode.E_LLM_EMPTY.name(), "模型未产出任何用例", result.latencyMs());
     }
+
+    // ------------------------------------------------------------------ 落库映射
 
     /**
      * draft 列表 → 待写入行（{@code seq_no} 从 1 递增，状态固定 {@code DRAFT}）。
@@ -306,13 +278,15 @@ public class CaseGenerateHandler implements TaskItemHandler {
      * @param task          所属任务
      * @param item          本次子项
      * @param testPoint     关联测试点
-     * @param drafts        模型产出
+     * @param drafts        编排层产出的草稿
      * @param promptVersion 本次使用的模板版本
      * @param model         本次使用的模型
+     * @param confidence    解析保真度（1.000 正常 / 0.500 宽松）
      * @return 待写入行
      */
     private List<TestCase> toRows(GenTask task, GenTaskItem item, TestPoint testPoint,
-                                  List<CaseDraft> drafts, String promptVersion, String model) {
+                                  List<CaseDraft> drafts, String promptVersion, String model,
+                                  BigDecimal confidence) {
         List<TestCase> rows = new ArrayList<>(drafts.size());
         int seqNo = 1;
         for (CaseDraft draft : drafts) {
@@ -333,7 +307,7 @@ public class CaseGenerateHandler implements TaskItemHandler {
             row.setCaseType(isBlank(draft.caseType()) ? CaseType.FUNCTIONAL.code() : draft.caseType());
             // 新生成的一律 DRAFT；重跑时 upsert 不覆盖 status，评审结果不会被冲掉
             row.setStatus(CaseStatus.DRAFT.code());
-            row.setConfidence(CONFIDENCE_NORMAL);
+            row.setConfidence(confidence);
             row.setPromptVersion(promptVersion);
             row.setModel(model);
             row.setContentHash(contentHashOf(row.getTitle(), stepsJson, row.getExpected()));
@@ -368,6 +342,51 @@ public class CaseGenerateHandler implements TaskItemHandler {
         }
         return JsonUtils.toJson(array);
     }
+
+    // ------------------------------------------------------------------ few-shot 素材
+
+    /**
+     * few-shot 素材（提示词 {@code {{few_shot}}}）。
+     *
+     * <p><b>查不到就传空串，不传"无"也不传 null</b>：模板里 {@code {{few_shot}}} 的位置在"参考范例"
+     * 段落，空串让它自然留白；写成"无"会让模型以为"参考范例就是'无'"，反而降低输出质量。</p>
+     *
+     * <p><b>查询失败不许让整个 item 失败</b>：素材只是锦上添花，正文（测试点 + 接口上下文）
+     * 才是主体。素材表扫不动（锁、慢查询、索引缺失）时整个生成任务全红，是明显不成比例的
+     * 失败放大。这里 try/catch 后按"没有素材"继续，并打 WARN 留痕。</p>
+     *
+     * @param docId 文档 ID（可为 null）
+     * @return 渲染好的素材文本；无素材/查询失败返回空串
+     */
+    private String fewShotOf(Long docId) {
+        if (docId == null) {
+            return "";
+        }
+        List<TestCase> samples;
+        try {
+            samples = testCaseMapper.selectFewShot(docId, FEW_SHOT_LIMIT);
+        } catch (RuntimeException ex) {
+            log.warn("[CASE] 查询 few-shot 素材失败，本次按无素材继续 docId={} 原因={}",
+                    docId, ex.getMessage());
+            return "";
+        }
+        if (samples == null || samples.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (TestCase sample : samples) {
+            if (sample == null) {
+                continue;
+            }
+            out.append("- [").append(nullToEmpty(sample.getCaseType())).append("] 标题：")
+                    .append(oneLine(sample.getTitle()))
+                    .append("；预期：").append(oneLine(sample.getExpected()))
+                    .append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    // ------------------------------------------------------------------ 上下文拼装
 
     /**
      * 测试点的可读文本（提示词 {@code {{test_point}}}）。
@@ -438,6 +457,8 @@ public class CaseGenerateHandler implements TaskItemHandler {
         return out.toString();
     }
 
+    // ------------------------------------------------------------------ 定位与兜底
+
     /**
      * 测试点定位：外键优先，其次 {@code unit_ref} 的 {@code testpoint:<id>}。
      *
@@ -469,7 +490,8 @@ public class CaseGenerateHandler implements TaskItemHandler {
      * 本次调用的 attemptNo（从 1 开始）。
      *
      * <p>{@code item.attempts} 记的是<b>已经失败过几次</b>，所以本次是第 {@code attempts + 1} 次。
-     * 它落到 {@code llm_call_log.attempt_no}，是"首次通过率 / 平均重试次数"两个指标的唯一来源。</p>
+     * 它落到 {@code llm_call_log.attempt_no}，是"首次通过率 / 平均重试次数"两个指标的唯一来源。
+     * 返修轮次<b>不</b>递增它（返修是同一次尝试内部的补救，不是 item 级重试）。</p>
      *
      * @param item 子项
      * @return {@code attempts + 1}
@@ -479,54 +501,24 @@ public class CaseGenerateHandler implements TaskItemHandler {
     }
 
     /**
-     * 本次使用的模型名：响应自报优先，其次任务配置，最后全局配置。
+     * 落库用的模型名：任务配置优先，其次全局配置。
      *
-     * <p>落库用它是为了"哪个模型的用例被驳回最多"这类分析有据可查。</p>
+     * <p><b>不再优先用响应回显</b>：{@code LlmRequest} 里没有 model 字段（模型由 provider +
+     * {@code ai.model} 决定），所以"任务/配置里写的模型"就是本次实际使用的模型；
+     * 上游回显反而是网关二次加工后的值。真正按模型归集成本的 {@code llm_call_log}
+     * 由编排层用响应回显优先的口径记录，两条口径各服务各的报表。</p>
      *
-     * @param task     所属任务（带本次提交的 model）
-     * @param response 模型响应（mock 与部分网关会回显 model）
+     * @param task 所属任务（可带本次提交的 model）
      * @return 非空模型名
      */
-    private String resolveModel(GenTask task, LlmResponse response) {
-        if (response != null && !isBlank(response.getModel())) {
-            return response.getModel();
-        }
+    private String resolveModel(GenTask task) {
         if (task != null && !isBlank(task.getModel())) {
             return task.getModel();
         }
         return nullToEmpty(aiProperties.getModel());
     }
 
-    /**
-     * 成本（微元）。
-     *
-     * <p><b>响应没回显 model 时成本记 0</b>：单价表按模型名索引，拿不到模型名就算不出钱，
-     * 硬套一个默认模型的单价会把成本算错（比记 0 更糟——0 一眼能看出是缺数据）。
-     * 这类调用事后可以用 {@code llm_call_log} 里的 token 数按任务配置的模型回填，留 T07-2。</p>
-     *
-     * @param response 模型响应
-     * @param usage    token 用量
-     * @return 成本（微元）
-     */
-    private long costMicroOf(LlmResponse response, LlmUsage usage) {
-        String model = response == null ? null : response.getModel();
-        if (isBlank(model)) {
-            log.debug("[CASE] 响应未回显 model，本次成本记 0（待 T07-2 用 llm_call_log 回填）");
-            return 0L;
-        }
-        return modelPriceCache.costMicro(model, usage);
-    }
-
-    /**
-     * 耗时（毫秒，夹到 int 范围内以便落 {@code INT} 列）。
-     *
-     * @param response 模型响应
-     * @return 非负毫秒数
-     */
-    private int latencyMsOf(LlmResponse response) {
-        long latency = response == null ? 0L : response.getLatencyMs();
-        return (int) Math.max(0L, Math.min(latency, Integer.MAX_VALUE));
-    }
+    // ------------------------------------------------------------------ 小工具
 
     /**
      * 内容哈希：{@code sha256(title \n steps \n expected)}。
@@ -562,6 +554,19 @@ public class CaseGenerateHandler implements TaskItemHandler {
             // JDK 一定带 SHA-256；走到这里说明运行环境被动过手脚，不能吞
             throw new IllegalStateException("运行环境缺少 SHA-256，无法计算用例去重键", ex);
         }
+    }
+
+    /**
+     * 压成一行（few-shot 素材用）：换行会把"一行一条"的素材列表切成碎片。
+     *
+     * @param text 原文
+     * @return 单行文本（超长截断到 {@link #FEW_SHOT_TEXT_MAX}）
+     */
+    private static String oneLine(String text) {
+        String flat = nullToEmpty(text).replaceAll("\\s+", " ").trim();
+        return flat.length() <= FEW_SHOT_TEXT_MAX
+                ? flat
+                : flat.substring(0, FEW_SHOT_TEXT_MAX) + "…";
     }
 
     /**

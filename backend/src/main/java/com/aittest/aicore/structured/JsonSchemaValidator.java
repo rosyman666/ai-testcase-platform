@@ -3,6 +3,7 @@ package com.aittest.aicore.structured;
 import com.aittest.aicore.LlmException;
 import com.aittest.common.ErrorCode;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.JsonNodePath;
@@ -66,6 +67,85 @@ public class JsonSchemaValidator {
         String detail = describe(errors);
         log.warn("[SCHEMA] 校验不通过 schema={} 首个错误={}", schemaPath, detail);
         throw new LlmException(ErrorCode.E_SCHEMA_INVALID, "模型输出未通过结构校验：" + detail, true);
+    }
+
+    /**
+     * <b>元素级筛选</b>：把数组里不合规的元素丢掉，留下合规的。
+     *
+     * <p><b>为什么要它</b>：三档降级的宽松档（{@code LENIENT}）面对的是"20 条里坏了 2 条"的输出。
+     * 整批丢弃等于把 18 条好数据一起扔掉（用户看到"一条都没生成"），整批放行则会把坏数据写进
+     * 评审池。逐元素校验是唯一正确的粒度——这也正是"99 条里错 1 条"时模型输出的典型形状。</p>
+     *
+     * <p><b>怎么拿到元素级 schema</b>：取根 schema 的 {@code items} 子节点单独编译。
+     * 不能直接对元素调 {@code rootSchema.validate(element)}——根 schema 描述的是<b>数组</b>，
+     * 拿对象去校验数组 schema 会立刻报"类型不对"，一条都留不下。</p>
+     *
+     * <p><b>schemaPath 为空时原样返回</b>：没有 schema 就没有"合规"这个概念，
+     * 此时筛选等于凭空丢弃数据。这种情况只可能出现在模板没配 {@code output_schema}
+     * （D-41 记录的边界），不做判断反而更安全。</p>
+     *
+     * @param items      待筛选元素
+     * @param schemaPath schema 路径（可带 {@code classpath:} 前缀）
+     * @return 合规元素（保持原顺序；可能为空，不会为 {@code null}）
+     */
+    public List<JsonNode> filterValidItems(ArrayNode items, String schemaPath) {
+        List<JsonNode> kept = new ArrayList<>();
+        if (items == null || items.isEmpty()) {
+            return kept;
+        }
+        JsonSchema itemSchema = loadItemSchema(schemaPath);
+        if (itemSchema == null) {
+            items.forEach(kept::add);
+            return kept;
+        }
+        int dropped = 0;
+        int firstDroppedIndex = -1;
+        String firstError = null;
+        for (int i = 0; i < items.size(); i++) {
+            JsonNode item = items.get(i);
+            Set<ValidationMessage> errors = itemSchema.validate(item);
+            if (errors == null || errors.isEmpty()) {
+                kept.add(item);
+                continue;
+            }
+            dropped++;
+            if (firstDroppedIndex < 0) {
+                firstDroppedIndex = i;
+                // 元素级校验的实例路径是相对元素的（形如 .priority），
+                // 不带下标就看不出是哪一条，所以下标单独记
+                firstError = describe(errors);
+            }
+        }
+        if (dropped > 0) {
+            log.warn("[SCHEMA] 宽松档丢弃 {} 条不合规元素（保留 {}/{}）schema={} 首个不合规下标={} 错误={}",
+                    dropped, kept.size(), items.size(), schemaPath, firstDroppedIndex, firstError);
+        }
+        return kept;
+    }
+
+    /**
+     * 加载（并缓存）数组 schema 的 {@code items} 子 schema。
+     *
+     * @param schemaPath schema 路径
+     * @return 元素级 schema；{@code schemaPath} 为空或根 schema 没有 {@code items} 时返回 {@code null}
+     */
+    private JsonSchema loadItemSchema(String schemaPath) {
+        if (schemaPath == null || schemaPath.isBlank()) {
+            return null;
+        }
+        String key = normalizePath(schemaPath) + "#/items";
+        JsonSchema cached = cache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        JsonNode itemNode = load(schemaPath).getSchemaNode().get("items");
+        if (itemNode == null || itemNode.isNull()) {
+            log.warn("[SCHEMA] 根 schema 没有 items 子 schema，宽松档无法做元素级筛选 schema={}", schemaPath);
+            return null;
+        }
+        JsonSchema compiled = FACTORY.getSchema(itemNode);
+        cache.put(key, compiled);
+        return compiled;
     }
 
     /**

@@ -61,4 +61,19 @@
            AND seq_no &gt; #{keepSeqNo}
     </delete>
 
+    <!-- few-shot 素材：同文档已采纳的历史用例，最近的 N 条。
+         只取 ACCEPTED/EDITED：DRAFT 是模型自己刚产出的（拿它当范例等于用模型的输出教模型），
+         REJECTED 是明确不要的。
+         按 updated_at 倒序：文档里的接口会改版，越近的用例越贴合当前接口。
+         只查三列：steps 有十几条，5 条范例的 steps 会吃掉大量 token，收益远小于成本。
+         resultType 走实体 + map-underscore-to-camel-case，只为复用 case_type → caseType 的映射。 -->
+    <select id="selectFewShot" resultType="com.aittest.testcase.domain.TestCase">
+        SELECT title, case_type, expected
+          FROM test_case
+         WHERE doc_id = #{docId}
+           AND status IN ('ACCEPTED', 'EDITED')
+         ORDER BY updated_at DESC
+         LIMIT #{limit}
+    </select>
+
 </mapper>

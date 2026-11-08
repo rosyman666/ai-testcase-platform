@@ -64,4 +64,27 @@ public interface TestCaseMapper extends BaseMapper<TestCase> {
      */
     int deleteStaleSeqNo(@Param("taskItemId") Long taskItemId,
                          @Param("keepSeqNo") int keepSeqNo);
+
+    /**
+     * 取 few-shot 素材：同一文档下<b>已被采纳</b>的历史用例，最近的 N 条。
+     *
+     * <p><b>为什么只取 {@code ACCEPTED}/{@code EDITED}</b>：DRAFT 是模型刚生成的、还没人看过的内容，
+     * 拿它当范例等于"用模型的输出教模型"，误差会自我强化；REJECTED 更不能要。
+     * 只有人工采纳过（或采纳后又改过）的才是"这篇文档里公认的好用例"。</p>
+     *
+     * <p><b>为什么按 {@code updated_at} 倒序</b>：同一文档的接口会改版，越近的用例越贴合当前接口；
+     * 按 {@code created_at} 会让三年前的范例压过刚评审通过的那批。</p>
+     *
+     * <p><b>为什么只返回三列</b>：提示词里只用到 {@code title}/{@code case_type}/{@code expected}
+     * （{@code steps} 动辄十条，5 条范例就能吃掉上千 token，收益远小于成本）。</p>
+     *
+     * <p><b>只填充部分字段</b>：返回的 {@link TestCase} 除这三列外全是 {@code null}，
+     * <b>不可拿去落库</b>（{@code id} 为空会撞 NOT NULL）。用实体而不是新建 DTO 是为了
+     * 复用 {@code map-underscore-to-camel-case} 的现成映射，避免为一个查询再长一个类。</p>
+     *
+     * @param docId 文档 ID
+     * @param limit 取几条（调用方传常量，避免全表扫）
+     * @return 素材（可能为空列表，不会为 {@code null}）
+     */
+    List<TestCase> selectFewShot(@Param("docId") Long docId, @Param("limit") int limit);
 }

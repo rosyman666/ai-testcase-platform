@@ -99,6 +99,28 @@ public class StructuredOutputParser {
     }
 
     /**
+     * <b>只解包不校验</b>：修复 → 解析 → 归一成数组。
+     *
+     * <p><b>给谁用</b>：三档降级里的<b>宽松档</b>（{@code LENIENT}）。那条路径的前提正是
+     * "整体不合规、但部分元素合规"，所以绝不能走 {@link #parseArrayWithMeta}——
+     * 它一校验就抛 {@code E_SCHEMA_INVALID}，宽松档连数据都拿不到。
+     * 调用方拿到数组后按元素逐个筛（{@code JsonSchemaValidator#filterValidItems}）。</p>
+     *
+     * <p><b>为什么不在这里再加一个"筛选"参数</b>：本类的职责边界是"文本 → 节点"，
+     * 元素级筛选需要 schema，而 schema 归 {@code JsonSchemaValidator}。
+     * 把筛选塞进来会让解析器依赖 schema 的字段路径语义，也就会长出第二份校验实现。</p>
+     *
+     * @param raw 模型原始输出
+     * @return 数组节点（裸数组或 {@code {"cases": [...]}} 均可）
+     * @throws LlmException 修复后仍不是合法 JSON，或既不是数组也找不到数组字段
+     */
+    public ArrayNode unwrapArray(String raw) {
+        // 与 parseArrayWithMeta 走同一条解包路径：私有 toArray 只有一份实现，
+        // 这里只把"入口"公开出来（复制一份解包逻辑就等着两处漂移）
+        return toArray(parseToNode(raw));
+    }
+
+    /**
      * 解析成强类型列表。
      *
      * @param raw         模型原始输出

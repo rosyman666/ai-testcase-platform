@@ -751,7 +751,7 @@ erDiagram
 | 写入路径 | 应该怎么写 |
 |---|---|
 | MP insert / update | 交给 `AuditMetaObjectHandler`（JVM 时钟 UTC），**业务代码禁止手写** |
-| 业务代码里的手写 `UPDATE`（如 §3.2.2 步骤 3） | **必须显式 `updated_at = UTC_TIMESTAMP(3)`** —— 它绕过了填充器，不能依赖会话 |
+| 业务代码里的手写 `UPDATE`（如 §3.2.2 步骤 3，**该示例运行在已钉 `+00:00` 的应用连接上，`NOW(3)` 与 `UTC_TIMESTAMP(3)` 等价**） | **必须显式 `updated_at = UTC_TIMESTAMP(3)`** —— 它绕过了填充器，不能依赖会话 |
 | 迁移脚本省略时间列的 INSERT | 依赖 DDL 默认值（Flyway 与业务共用同一 DataSource，会话已钉住） |
 | 人工连库 / 运维脚本 | 见 §3.2.1.2 |
 

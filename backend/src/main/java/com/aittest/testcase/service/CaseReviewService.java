@@ -216,6 +216,14 @@ public class CaseReviewService {
      * 先 INSERT 再 UPDATE 的话，抢输的那条会留下一行"评审了但状态没变"的孤儿台账，
      * 而它还在同一个事务里，会被一起提交。</p>
      *
+     * <p><b>⚠️ 这个顺序差异不是笔误，谁想"统一一下"就是把它改回事故</b>：
+     * {@link #apply} 与 {@link #edit} 是"锁行 → INSERT → UPDATE"（行已被
+     * {@code FOR UPDATE} 独占，不存在抢输），本方法是"条件 UPDATE → INSERT"
+     * （没有行锁，用 {@code WHERE status='DRAFT'} 当乐观锁）。两者的前置条件不同，
+     * 顺序就该不同；统一成任何一个方向都会在另一条路径上出错：
+     * 单条改成 UPDATE 在前，就失去了"台账先落地"的回滚依据；
+     * 批量改成 INSERT 在前，就等于放弃了对抢输的拦截。</p>
+     *
      * @param req 批量入参
      * @return {@code {updated, skipped}}；{@code skipped} 带可读中文原因
      * @throws BizException 缺动作 40002 / 动作非法 40001 / 批量不支持 EDIT 40001 /

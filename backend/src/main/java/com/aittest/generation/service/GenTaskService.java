@@ -4,20 +4,30 @@ import com.aittest.auth.AuthContext;
 import com.aittest.common.BizException;
 import com.aittest.common.ErrorCode;
 import com.aittest.common.IdGen;
+import com.aittest.common.PageQuery;
+import com.aittest.common.PageResult;
+import com.aittest.common.enums.CodedEnum;
 import com.aittest.common.enums.TaskScene;
 import com.aittest.common.enums.TaskStatus;
 import com.aittest.generation.domain.GenTask;
 import com.aittest.generation.domain.GenTaskItem;
+import com.aittest.generation.dto.GenTaskItemVO;
+import com.aittest.generation.dto.GenTaskVO;
 import com.aittest.generation.mapper.GenTaskItemMapper;
 import com.aittest.generation.mapper.GenTaskMapper;
 import com.aittest.testpoint.domain.TestPoint;
 import com.aittest.testpoint.mapper.TestPointMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -320,6 +330,120 @@ public class GenTaskService {
             throw new BizException(ErrorCode.E_NOT_FOUND, "任务不存在");
         }
         return task;
+    }
+
+    /**
+     * 任务分页列表（{@code GET /api/tasks}，前端 {@code TaskList} 的唯一数据源）。
+     *
+     * <p><b>{@code scene}/{@code status} 传了脏值就 {@code 40001}</b>，不静默当"无筛选"：
+     * 静默忽略会让用户以为筛选生效了，对着一个"没筛过的全量列表"做判断。
+     * 空串/空白视为"不筛"（前端清空下拉框后往往传空串，那确实是想看全部）。</p>
+     *
+     * <p><b>排序默认 {@code created_at DESC} 且末尾一定补 {@code id DESC}</b>：
+     * {@code created_at} 是 {@code DATETIME(3)}，同一毫秒内建的两个任务在
+     * {@code LIMIT/OFFSET} 翻页时顺序不固定，会<b>漏行或重复行</b>。
+     * 主键是雪花 ID、单调递增，补上它才有全序。</p>
+     *
+     * <p><b>不做归属过滤</b>：与 {@code GET /api/tasks/{id}} 一致（那里也没有归属校验），
+     * 只有 SSE 订阅做了归属隔离（I9）。列表若要按 {@code created_by} 过滤，
+     * 得先定"历史任务 created_by 为 NULL 怎么办"，那是另一个决定，不在本批。</p>
+     *
+     * @param scene 场景过滤（可空：不筛；脏值 40001）
+     * @param status 状态过滤（可空：不筛；脏值 40001）
+     * @param docId 文档过滤（可空：不筛）
+     * @param query 分页与排序
+     * @return 分页结果
+     * @throws BizException 场景/状态取值非法 40001
+     */
+    public PageResult<GenTaskVO> page(String scene, String status, Long docId, PageQuery query) {
+        PageQuery effective = query == null ? new PageQuery() : query;
+
+        LambdaQueryWrapper<GenTask> wrapper = new LambdaQueryWrapper<>();
+        if (scene != null && !scene.isBlank()) {
+            wrapper.eq(GenTask::getScene, requireEnumCode(scene.trim(), TaskScene.values(), "任务场景"));
+        }
+        if (status != null && !status.isBlank()) {
+            wrapper.eq(GenTask::getStatus, requireEnumCode(status.trim(), TaskStatus.values(), "任务状态"));
+        }
+        wrapper.eq(docId != null, GenTask::getDocId, docId);
+        applyTaskSort(wrapper, effective);
+
+        IPage<GenTask> result = genTaskMapper.selectPage(
+                new Page<>(effective.pageOrDefault(), effective.sizeOrDefault()), wrapper);
+        List<GenTaskVO> records = result.getRecords().stream()
+                .map(GenTaskVO::of)
+                .collect(Collectors.toList());
+        return PageResult.of(records, result.getTotal(),
+                effective.pageOrDefault(), effective.sizeOrDefault());
+    }
+
+    /**
+     * 任务的逐 item 明细（{@code GET /api/tasks/{id}/items}，T07-3 验收⑥ 的唯一数据源）。
+     *
+     * <p><b>为什么必须先 {@link #require} 一次</b>：不先查任务，一个不存在的 taskId 会得到
+     * 空数组——前端分不清"任务不存在"和"任务存在但还没有 item"，前者该提示错误、
+     * 后者是正常的中间态。多一次 {@code selectById} 换一个明确语义。</p>
+     *
+     * <p><b>按 {@code id ASC} 排</b>（不是 {@code created_at}）：子项是批量 INSERT 进来的，
+     * 一次插入的几十行 {@code created_at} 很可能是<b>同一个毫秒</b>，按它排序结果不确定；
+     * 而雪花 ID 单调递增，等价于插入顺序，也就等价于 {@code unitRef} 的抽取顺序
+     * （{@code create} 按 {@code unitRefs} 的顺序逐条组装）。</p>
+     *
+     * <p><b>一次性取全量，不分页</b>：一个任务的 item 数上限就是切分单元数或测试点数
+     * （60 量级），分页只会让"任务详情页"要么翻页要么写两套渲染逻辑。</p>
+     *
+     * @param taskId 任务
+     * @return 明细（按创建顺序；任务没有 item 时返回空列表）
+     * @throws BizException 任务不存在 40401
+     */
+    public List<GenTaskItemVO> listItems(Long taskId) {
+        GenTask task = require(taskId);
+        List<GenTaskItem> rows = genTaskItemMapper.selectList(new LambdaQueryWrapper<GenTaskItem>()
+                .eq(GenTaskItem::getTaskId, task.getId())
+                .orderByAsc(GenTaskItem::getId));
+        return rows.stream().map(GenTaskItemVO::of).collect(Collectors.toList());
+    }
+
+    /**
+     * 任务列表排序（白名单列，默认创建时间）。
+     *
+     * <p>与 {@code TestPointService#applySort} 同一套写法：只允许白名单列，
+     * 末尾补 {@code id DESC} 形成全序，避免同毫秒下翻页抖动。</p>
+     *
+     * @param wrapper 查询条件
+     * @param query   分页参数
+     */
+    private void applyTaskSort(LambdaQueryWrapper<GenTask> wrapper, PageQuery query) {
+        String column = query.sortColumnOrDefault("created_at");
+        boolean desc = query.isDesc();
+        switch (column) {
+            case "updated_at" -> wrapper.orderBy(true, desc, GenTask::getUpdatedAt);
+            case "status" -> wrapper.orderBy(true, desc, GenTask::getStatus);
+            case "scene" -> wrapper.orderBy(true, desc, GenTask::getScene);
+            default -> wrapper.orderBy(true, desc, GenTask::getCreatedAt);
+        }
+        wrapper.orderByDesc(GenTask::getId);
+    }
+
+    /**
+     * 校验枚举码字符串是否合法，返回规范化后的码。
+     *
+     * <p>把可选值一次列全：只说"状态不合法"，用户要猜六次才知道有哪些可选。</p>
+     *
+     * @param value  待校验值（已 trim）
+     * @param values 枚举常量数组
+     * @param label  中文名（异常文案用）
+     * @return 规范化后的码
+     * @throws BizException 取值不在枚举内 40001
+     */
+    private String requireEnumCode(String value, CodedEnum[] values, String label) {
+        for (CodedEnum item : values) {
+            if (item.code().equals(value)) {
+                return item.code();
+            }
+        }
+        String allowed = Arrays.stream(values).map(CodedEnum::code).collect(Collectors.joining("/"));
+        throw new BizException(ErrorCode.E_PARAM_INVALID, label + "取值不合法，可选值：" + allowed);
     }
 
     /**

@@ -5,10 +5,13 @@ import com.aittest.auth.TokenService;
 import com.aittest.common.ApiResponse;
 import com.aittest.common.BizException;
 import com.aittest.common.ErrorCode;
+import com.aittest.common.PageQuery;
+import com.aittest.common.PageResult;
 import com.aittest.common.enums.TaskScene;
 import com.aittest.common.enums.TaskStatus;
 import com.aittest.generation.domain.GenTask;
 import com.aittest.generation.dto.GenTaskCreateReq;
+import com.aittest.generation.dto.GenTaskItemVO;
 import com.aittest.generation.dto.GenTaskVO;
 import com.aittest.generation.service.GenTaskService;
 import com.aittest.generation.service.ProgressPublisher;
@@ -16,6 +19,7 @@ import com.aittest.generation.service.SseEmitterRegistry;
 import com.aittest.generation.service.SseErrorResponder;
 import jakarta.validation.Valid;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +34,21 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
- * 任务接口：创建、查询、取消、SSE 订阅。
+ * 任务接口：创建、查询、列表、逐 item 明细、取消、SSE 订阅。
+ *
+ * <p><b>端点清单</b>（T05 补齐 {@code GET /api/tasks} 与 {@code GET /api/tasks/{id}/items}，
+ * 见 §4.2 #25/#27）：</p>
+ * <pre>
+ * POST /api/tasks                 创建（立即返回 taskId，验收①）
+ * GET  /api/tasks                 分页列表（scene/status/docId 可选过滤）
+ * GET  /api/tasks/{id}            任务详情
+ * GET  /api/tasks/{id}/items      逐 item 明细（T07-3 验收⑥ 的唯一数据源）
+ * POST /api/tasks/{id}/cancel     取消
+ * GET  /api/tasks/{id}/stream     SSE 订阅
+ * </pre>
+ * <p>{@code POST /api/tasks/{id}/retry} 在 §4.2 有编号但<b>本批未实现</b>：它要把
+ * {@code FAILED} item 重置回 {@code PENDING} 并回滚 {@code done_items}/{@code produced_items}
+ * 两个计数，属于状态机回退，风险高于收益，也不是 T07-3 的验收项。</p>
  *
  * <p><b>SSE 端点的鉴权在这里做，不走 {@code AuthInterceptor}</b>（§4.3）：
  * 浏览器的 {@code EventSource} <b>无法自定义请求头</b>，只能把 token 放查询串，
@@ -111,6 +129,50 @@ public class GenTaskController {
     @GetMapping("/{id}")
     public ApiResponse<GenTaskVO> get(@PathVariable("id") Long id) {
         return ApiResponse.ok(GenTaskVO.of(genTaskService.require(id)));
+    }
+
+    /**
+     * 任务分页列表（{@code TaskList} 页面的唯一数据源）。
+     *
+     * <p><b>三个筛选参数都可空</b>，但传了脏值一律 {@code 40001}：静默忽略会让用户
+     * 以为筛选生效，对着一份没筛过的列表做判断。空串/空白按"不筛"处理
+     * （前端清空下拉框后常传空串）。</p>
+     *
+     * <p>排序由服务端定死为 {@code created_at DESC, id DESC}（可传 {@code sort} 覆盖白名单列）：
+     * 只按 {@code created_at} 排时，同一毫秒建的两个任务在翻页时会漏行或重复出现。</p>
+     *
+     * @param scene  场景过滤（可空）
+     * @param status 状态过滤（可空）
+     * @param docId  文档过滤（可空）
+     * @param query  分页与排序
+     * @return 分页结果
+     */
+    @GetMapping
+    public ApiResponse<PageResult<GenTaskVO>> list(
+            @RequestParam(name = "scene", required = false) String scene,
+            @RequestParam(name = "status", required = false) String status,
+            @RequestParam(name = "docId", required = false) Long docId,
+            PageQuery query) {
+        return ApiResponse.ok(genTaskService.page(scene, status, docId, query));
+    }
+
+    /**
+     * 任务的逐 item 明细（T07-3 验收⑥：任务详情页展示每个子项的耗时与错误码）。
+     *
+     * <p><b>这是明细的唯一权威来源，SSE 只做加速</b>：SSE 是有损通道——
+     * {@code SseEmitterRegistry.send} 对 {@code IOException} 只打 DEBUG 不重投，
+     * 而任务进入终态后新订阅只推 1 帧 {@code snapshot} 就 EOF。所以终态后进详情页，
+     * 必须走这个接口拿明细。</p>
+     *
+     * <p>{@code errorCode} 是 <b>item 级</b>错误码（D-44），任务级 {@code error_code}
+     * 仍恒为 {@code E_INTERNAL}（D-42 未修）——前端显示失败原因要读这里，不要读任务级那个。</p>
+     *
+     * @param id 任务 ID
+     * @return 明细列表（按 id 升序 = 创建顺序；无 item 时为空数组）
+     */
+    @GetMapping("/{id}/items")
+    public ApiResponse<List<GenTaskItemVO>> items(@PathVariable("id") Long id) {
+        return ApiResponse.ok(genTaskService.listItems(id));
     }
 
     /**

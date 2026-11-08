@@ -417,14 +417,17 @@
 5. **`@AssertTrue` 包路径写错 / `AuthContext` API 名写错 / `ErrorCode.code()` 与 `getCode()` 不一致**：三者都是编译期问题，但报错分散在 DTO、controller、异常分支三处，容易被误判成"某处业务逻辑写错了"。实际都是**照着记忆写 API 名**：`jakarta.validation.constraints.AssertTrue`（不是 `javax`）、`AuthContext.requireUserId()`、`ErrorCode` 的 `code()` 由 `CodedEnum` 提供而枚举自身是 `name()` / `getCode()`。凡涉及枚举与上下文 API，先 `grep` 一次定义再写。
 6. **终态抢占与任务级收尾的顺序**：`onTaskFinalize` 必须在 `markTerminal` **之前**跑，但它本身失败只打 ERROR 不阻断；若顺序反过来，`supersedeMissing` 会在任务已终态后再改测试点，前端 `done` 事件已经发出，用户看到的是"完成了但列表又变了"。
 7. **冒烟脚本必须自己清数据**：与 T05 同一个坑——`DocService` 对同名同哈希文件"命中缓存秒回"复用 `docId`，上一轮的 `test_point` 会串进本轮"重复抽取不翻倍"的计数断言。`t06smoke.py` 每次上传用独立的 OpenAPI 内容并以新 `doc_id` 做作用域。
+8. **`produces = text/event-stream` 下抛异常 → 500 空 body**：SSE 端点声明 `produces` 后，异常一旦由 `@RestControllerAdvice` 按 JSON 输出，内容协商失败抛 `HttpMediaTypeNotAcceptableException`。真实浏览器 `EventSource` 发的 `Accept: text/event-stream` 命中这条路，而 `curl`（`Accept: */*`）走正常路径，于是"本地 curl 看着 401 正常、浏览器却拿 500 空 body"。**教训：`produces` 收紧的不只是成功响应，异常响应也被约束；凡是 `produces` 非 `*/*` 的端点，必须单独验"异常时前端到底收到什么"。**
+9. **`ResponseBodyEmitter` 的 early send + `complete()` 只有容器 `initialize` 时才真正 flush**：`emitter.send()` 在尚未 `initialize` 时进 `earlySendAttempts` 缓冲、`complete()` 只置标志，真正把缓冲刷出去、再关流发生在容器 `initialize` 时。所以"在 controller `return` 之前写完 error 帧"是可行的，但**必须用真 Tomcat + `curl` 实测确认帧真的刷出来了**——只做字节码推断会得出"可能丢失"的错误结论。这是"推断不能替代实测"的又一例。
+10. **验收脚本里对已解析的 `data` 再调 `_json()` 会走兜底分支、对 dict 切片抛 `KeyError`**：`parse_frame` 已经把 `data:` 解析成对象，脚本再调一次 `_json()` 且该分支按字符串切片处理，就会对 dict 抛 `KeyError: slice(...)`。**教训：解析函数要幂等或显式分层，"已解析对象"和"原始字符串"不能混用。**（这条是 QA 脚本自己的坑，留档备查。）
 
 ### 下一步
 
-- ~~补 T06 的**全量单测与端到端回归**~~ **→ 已闭合**：见下方「验收实录」，全量单测 165 条 0 失败、`t06smoke`/`t06sse`/`t05e2e_async`/`t06negative`/`t06deadlock_stress` 全跑完（`t06negative` 3 条 INCONCLUSIVE 已由确定性单测替代，1 条 WARN 登记 T07）。
+- ~~补 T06 的**全量单测与端到端回归**~~ **→ 已闭合**：见下方「验收实录」，全量单测 170 条 0 失败、`t06smoke`/`t06sse`/`t05e2e_async`/`t06negative`/`t06deadlock_stress` 全跑完（`t06negative` 3 条 INCONCLUSIVE 已由确定性单测替代，1 条 WARN 登记 T07）。
 - **T07 用例生成编排**（未变，仍是下一阶段主体）：`generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}`，复用 `TaskItemHandler` 注册 `CASE_GENERATE` 场景；`test_point → test_case` 外键与三档降级（坏 JSON 修复 / 宽松解析 `confidence=0.5` / 上游 500 重试后置 FAILED）。
 - 前端（**未闭合，进 T07**）：评审页补**批量采纳**与"跳到原文"；任务列表页 / 任务详情页接 SSE（`frontend/src/api/{task.ts,sse.ts}`、`hooks/useTaskStream.ts` 这三个文件 T06 尚未交付）。
 - 回改 §6 T06 的 ⑧⑨⑩（**未闭合，见 §11.1 D-33**）：当前 `nowUtc` 由 `LocalDateTime.now(ZoneOffset.UTC)` 硬取，尚未注入 `Clock` bean。
-- **进 T07 的遗留清单**（本次验收新增/加强）：**D-35 SSE 错误响应在浏览器式 `Accept` 下退化为 500 空 body（放首位）**、终态之后新订阅的 emitter 无人 `complete`（`ProgressPublisher.finish()` 只关"当时那批连接"，30 分钟超时兜底）、D-36 `test_point` 并发插入死锁（观测项）；以及既有 P1 重复取消幂等短路（会重放终态事件）、P2 `create` 缺二选一校验、`shouldPushProgress` 非原子、手工补点 `source_ref=""`、`created_by` 历史 NULL 放行、D-33 `Clock` 未注入。
+- **进 T07 的遗留清单**（本次验收新增/加强）：**终态之后新订阅的 emitter 无人 `complete`（现居首位）**（`ProgressPublisher.finish()` 只关"当时那批连接"，30 分钟超时兜底）、D-36 `test_point` 并发插入死锁（观测项）；以及既有 P1 重复取消幂等短路（会重放终态事件）、P2 `create` 缺二选一校验、`shouldPushProgress` 非原子、手工补点 `source_ref=""`、`created_by` 历史 NULL 放行、D-33 `Clock` 未注入。~~D-35~~ **已闭合**：SSE 错误响应改为「`200` + `event: error`」，见下方「D-35 真容器验证实录」与 §11.1 D-35/D-37。
 
 ### 验收实录（阶段 8 收口数据）
 
@@ -434,25 +437,52 @@
 |---|---|
 | `t06preflight.py`（GATE 0） | **8/8 PASS**（V6 已 apply / `unit_ref=varchar(200)` / `produced_items` 存在 / `error_msg` NOT NULL / `source_ref` 200 / `path` 500 / 唯一索引在 / **生效 provider=mock**） |
 | `t06smoke.py` | **12/12 PASS**（终态 SUCCESS、item 数=接口数、落库、`operation:` sourceRef、重复抽取不翻倍、取消终态 40901） |
-| `t06sse.py` | **39/39 PASS**（首帧 snapshot 14 字段、`total`=接口数、progress/item 帧、`done` 终态帧、`Last-Event-ID` 重连拿 DB 快照、无 token 401 不挂死） |
+| `t06sse.py` | **46/46 PASS**（首帧 snapshot 14 字段、`total`=接口数、progress/item 帧、`done` 终态帧、`Last-Event-ID` 重连拿 DB 快照、无 token 不挂死；**④ 段重写后新增 7 条契约断言**：无 token / 过期 token / 任务不存在 / owner 不匹配四类失败均 `200` + 单帧 `event:error` + 立即关流、`data` 为 JSON 对象且含 `code/message/traceId`） |
 | `t05e2e_async.py` | **106/106 PASS**（T05 语义全迁移：去重不翻倍、幽灵点置 SUPERSEDED 不删除、人工修订/停用重抽后保住、`done=success+failed+skipped` 从子表现读） |
-| `t06negative.py` | **59 PASS / 0 FAIL / 1 WARN / 3 INCONCLUSIVE**，退出码 **2** |
+| `t06negative.py` | **61 PASS / 0 FAIL / 1 WARN / 3 INCONCLUSIVE**，退出码 **2**（NEG-7 的 ③④ 改按新契约后 +2 条） |
 | `t06deadlock_stress.py`（新增） | **8/8** 与 **16/16** 并发建任务全成功、全部收敛、死锁日志 0 |
-| 全量单测 | **165 / 0 fail / 0 error / 7 skipped**（`BUILD SUCCESS`） |
+| 全量单测 | **170 / 0 fail / 0 error / 7 skipped**（`BUILD SUCCESS`） |
 
 **3 条 INCONCLUSIVE 及确定性替代**（均为「未验证」而非通过，不得据此写"测试全绿"）：
 
 1. NEG-1 in-flight 竞态黑盒未复现 → 由 `CancelInFlightRaceTest` 的 `CountDownLatch` 确定性覆盖（含正对照）。
 2. NEG-3 `getMessage()==null` 黑盒不可达 → 新增 `GenTaskWorkerTest` 用例（stub handler 抛无 message 的 `NullPointerException`，断言 `error_msg` 非空、item 不卡 RUNNING）。
-3. NEG-7 owner 不匹配分支 → 库里 `gen_task.created_by` 有外键 `fk_gen_task_created_by → app_user.id` 且只有 admin 一个用户，构造"别人的任务"需插 `app_user` 行或关 FK 检查，两条都不走 → 新增 `GenTaskControllerStreamAuthTest` 覆盖（7 例：空 token 短路（`null` 与空白各一例，且 `verify` 零调用）/ owner 不匹配 40301 且 register/pushSnapshot/complete 全部 never / owner 匹配 / `createdBy=NULL` 放行 / 终态任务推完快照即 complete / 终态 `CANCELED` 的 `InOrder` 顺序（register→pushSnapshot→complete，防快照被关流吞掉））。
+3. NEG-7 owner 不匹配分支 → 库里 `gen_task.created_by` 有外键 `fk_gen_task_created_by → app_user.id` 且只有 admin 一个用户，构造"别人的任务"需插 `app_user` 行或关 FK 检查，两条都不走 → 新增 `GenTaskControllerStreamAuthTest` 覆盖（9 例：空 token 短路（`null` 与空白各一例，且 `verify` 零调用）/ owner 不匹配 40301 且 register/pushSnapshot/complete 全部 never / owner 匹配 / `createdBy=NULL` 放行 / 终态任务推完快照即 complete / 终态 `CANCELED` 的 `InOrder` 顺序（register→pushSnapshot→complete，防快照被关流吞掉）/ 新增 `invalidToken…`（40102 走 error 帧）/ `missingTask…`（40401 走 error 帧））。
 
 **1 条 WARN**：NEG-5「终态之后新订阅的 emitter 无人 `complete`」，属 `ProgressPublisher.finish()` 只关"当时那批连接"的已知窗口，30 分钟超时兜底，登记 T07。
 
-### 新偏差（本轮验收抓出，明细见 §11.1 D-34~D-36）
+### 新偏差（本轮验收抓出，明细见 §11.1 D-34~D-37）
 
 - **D-34（已修复 + 已压测验证）**：建任务子项插入的 InnoDB 死锁 —— `create()` 逐条 `insert`（60 条 = 60 个提交点）与 `claimBatch()` 在两张表上锁序交叉，实测修复前同一实例 **30 次建任务 2 次失败（≈6.7%）**。修复三件套（`TransactionTemplate` 独立事务 / `PessimisticLockingFailureException` 有界重试 / 去掉 `UPDATE` 子查询）后自然流量 19 次 0 失败、8×60 与 16×60（960 插入）压测全成功、死锁日志 0。
-- **D-35（未修，进 T07 首位）**：`@GetMapping(produces=text/event-stream)` 下异常响应内容协商失败 → 浏览器式 `Accept` 得到 **HTTP 500 + 空 body**，真实 `EventSource` 场景下 token 过期拿不到 body、无法区分"鉴权失败"与"服务崩了"，服务端还会记 500 ERROR。（**更正**：原文写"会无限重连"未实测，按规范非 200 是 `fail the connection`，不重连。）
+- **D-35（已闭合，2026-11-08 修复）**：`@GetMapping(produces=text/event-stream)` 下异常响应内容协商失败 → 浏览器式 `Accept` 得到 **HTTP 500 + 空 body**，token 过期时前端拿不到 body、无法区分"鉴权失败"与"服务崩了"。**已按用户裁决改为「`200` + `event: error`」并在真容器 `curl` 验过四分支**，契约变更见 §11.1 **D-37**（D-29 的「无 token 必须 401」被其取代）。**注意口径：此改动不是为了修重连**——`EventSource` 对非 200 本就是 `fail the connection`（不重连），改的是"让前端能拿到 `code`/`message`/`traceId`"。
 - **D-36（观测项，未专门处理）**：修复后实例仍有 3 次 `Deadlock found` 落在 `INSERT INTO test_point`，由 item 级 `attempts` 重试吸收，未观察到任务失败。**不写成"已解决"。**
+- **D-37（已实施，契约变更）**：SSE 鉴权/归属/找不到失败的响应形态从「抛异常 → HTTP 4xx + JSON」改为 **「HTTP 200 + `event: error` 帧」**。D-29 的「无 token 必须 401」被本条**取代**（保留 D-29 编号，其行注明"已被 D-37 取代"）。前端契约：`data.code ∈ {40101,40102}` → 跳登录页并置空 token；`40301` → 提示无权限；`40401` → 提示任务不存在；其余 code → 展示 `data.message` 并按"任务执行失败"处理（与 `ProgressPublisher` 推的执行失败 `error` 帧同形，靠 `code` 区分）。
+
+### D-35 真容器验证实录（2026-11-08）
+
+**契约（用户拍定）**：失败改走「`200` + `event: error`」，删掉 `produces` 的 4xx 分支。**口径**：此改动**不是为了修重连**（`EventSource` 对非 200 本就 `fail the connection`），而是让前端能拿到 `code`/`message`/`traceId`。
+
+**`curl -i` 实测（新 jar，同一 taskId）**：
+```
+HTTP/1.1 200
+Content-Type: text/event-stream;charset=UTF-8
+Transfer-Encoding: chunked
+
+event:error
+data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":null,"traceId":"f91bd9ca8ed44435"}
+```
+四条拒绝分支逐条验过（全部 `200` + 单帧 `event:error` + 立即关流）：
+
+| 场景 | code | message |
+|---|---|---|
+| 无 token / `?token=` 空 | `40101` | 缺少 token，无法订阅任务进度 |
+| 伪造 / 过期 token | `40102` | 登录状态异常，请重新登录 |
+| 任务不存在 | `40401` | 任务不存在 |
+| owner 不匹配 | `40301` | 无权订阅他人的任务进度（**仅单测覆盖**，库内只有 admin 一个用户） |
+
+`Accept: */*` 与 `Accept: text/event-stream` 输出完全一致（不再有"JSON 401 / SSE 500"两套行为）。
+
+**实现要点**：新增 `generation/service/SseErrorResponder#writeError(SseEmitter, ErrorCode, String)`（载荷复用 `ApiResponse.fail(...)`：`code/message/data=null/traceId`，traceId 同源 `MDC`；事件名 `error`；**不发 `id:` 行**；`data(payload, APPLICATION_JSON)` 序列化成 JSON 对象，前端 `JSON.parse(e.data)` 直接可用；`IOException` 改 `completeWithError` 不外抛）；`GenTaskController#stream()` 新增私有 `reject(id, code, message)` 作**唯一拒绝出口**（空 token 短路连 `verify` 都不做 → `verify`/`require`/归属校验包进一个 `try`、`catch (BizException ex) → reject`；`register`/`pushSnapshot`/终态 `complete` 严格在 `try` 之后，拒绝路径**零注册**，否则 emitter 会挂到 30 分钟超时）。**`E_TOKEN_INVALID(40102)` 也走 error 帧**——`tokenService.verify()` 抛的也是 `BizException`，漏掉它就等于"token 过期仍 500 空 body"，而那是线上最常见的鉴权失败。
 
 ---
 

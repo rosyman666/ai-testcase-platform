@@ -424,10 +424,10 @@
 ### 下一步
 
 - ~~补 T06 的**全量单测与端到端回归**~~ **→ 已闭合**：见下方「验收实录」，全量单测 170 条 0 失败、`t06smoke`/`t06sse`/`t05e2e_async`/`t06negative`/`t06deadlock_stress` 全跑完（`t06negative` 3 条 INCONCLUSIVE 已由确定性单测替代，1 条 WARN 登记 T07）。
-- **T07 用例生成编排**（未变，仍是下一阶段主体）：`generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}`，复用 `TaskItemHandler` 注册 `CASE_GENERATE` 场景；`test_point → test_case` 外键与三档降级（坏 JSON 修复 / 宽松解析 `confidence=0.5` / 上游 500 重试后置 FAILED）。
+- **T07 用例生成编排**（**T07-1 已交付，见阶段 9**；T07-2/T07-3 仍未开始，仍是下一阶段主体）：`generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}`，复用 `TaskItemHandler` 注册 `CASE_GENERATE` 场景；`test_point → test_case` 外键与三档降级（坏 JSON 修复 / 宽松解析 `confidence=0.5` / 上游 500 重试后置 FAILED）。
 - 前端（**未闭合，进 T07**）：评审页补**批量采纳**与"跳到原文"；任务列表页 / 任务详情页接 SSE（`frontend/src/api/{task.ts,sse.ts}`、`hooks/useTaskStream.ts` 这三个文件 T06 尚未交付）。
 - 回改 §6 T06 的 ⑧⑨⑩（**未闭合，见 §11.1 D-33**）：当前 `nowUtc` 由 `LocalDateTime.now(ZoneOffset.UTC)` 硬取，尚未注入 `Clock` bean。
-- **进 T07 的遗留清单**（本次验收新增/加强）：**终态之后新订阅的 emitter 无人 `complete`（现居首位）**（`ProgressPublisher.finish()` 只关"当时那批连接"，30 分钟超时兜底）、D-36 `test_point` 并发插入死锁（观测项）；以及既有 P1 重复取消幂等短路（会重放终态事件）、P2 `create` 缺二选一校验、`shouldPushProgress` 非原子、手工补点 `source_ref=""`、`created_by` 历史 NULL 放行、D-33 `Clock` 未注入。~~D-35~~ **已闭合**：SSE 错误响应改为「`200` + `event: error`」，见下方「D-35 真容器验证实录」与 §11.1 D-35/D-37。
+- **进 T07 的遗留清单**（本次验收新增/加强）：**终态之后新订阅的 emitter 无人 `complete`（现居首位）**（`ProgressPublisher.finish()` 只关"当时那批连接"，30 分钟超时兜底）、D-36 `test_point` 并发插入死锁（观测项）；以及既有 P1 重复取消幂等短路（会重放终态事件）、P2 `create` 缺二选一校验、`shouldPushProgress` 非原子、手工补点 `source_ref=""`、`created_by` 历史 NULL 放行、D-33 `Clock` 未注入；**T07-1 新增 D-42**（任务级 `error_code` 恒 `E_INTERNAL`，观测项）。**D-38~D-41 是已定版的决策，不进遗留清单。**~~D-35~~ **已闭合**：SSE 错误响应改为「`200` + `event: error`」，见下方「D-35 真容器验证实录」与 §11.1 D-35/D-37。
 
 ### 验收实录（阶段 8 收口数据）
 
@@ -483,6 +483,70 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 `Accept: */*` 与 `Accept: text/event-stream` 输出完全一致（不再有"JSON 401 / SSE 500"两套行为）。
 
 **实现要点**：新增 `generation/service/SseErrorResponder#writeError(SseEmitter, ErrorCode, String)`（载荷复用 `ApiResponse.fail(...)`：`code/message/data=null/traceId`，traceId 同源 `MDC`；事件名 `error`；**不发 `id:` 行**；`data(payload, APPLICATION_JSON)` 序列化成 JSON 对象，前端 `JSON.parse(e.data)` 直接可用；`IOException` 改 `completeWithError` 不外抛）；`GenTaskController#stream()` 新增私有 `reject(id, code, message)` 作**唯一拒绝出口**（空 token 短路连 `verify` 都不做 → `verify`/`require`/归属校验包进一个 `try`、`catch (BizException ex) → reject`；`register`/`pushSnapshot`/终态 `complete` 严格在 `try` 之后，拒绝路径**零注册**，否则 emitter 会挂到 30 分钟超时）。**`E_TOKEN_INVALID(40102)` 也走 error 帧**——`tokenService.verify()` 抛的也是 `BizException`，漏掉它就等于"token 过期仍 500 空 body"，而那是线上最常见的鉴权失败。
+
+---
+
+## 2026-11-08 · 阶段 9 · T07-1 用例生成（`CASE_GENERATE` 首次跑通）
+
+### 做了什么
+
+1. **`testcase` 模块落地第一层**（包名不是 `case`，理由见下方决策）：`testcase/domain/TestCase.java`（112 行，19 列与 `V1__schema.sql` 的 `test_case` 一一对应）、`testcase/mapper/TestCaseMapper.java`（67 行，`upsertBatch` / `deleteStaleSeqNo`）、`backend/src/main/resources/mapper/TestCaseMapper.xml`（64 行）、`testcase/dto/CaseDraft.java`（38 行，6 字段）。
+2. **`generation/service/CaseGenerateHandler.java`（623 行）**：实现 `TaskItemHandler` 的 `CASE_GENERATE` 场景——读测试点 → 渲染 `case_generate` 模板 → 调模型 → schema 校验 → 幂等落库 → 回写 item。`TaskItemHandler` 是 T06 留的接缝，这次第一次被真正实现（`CASE_GENERATE` 与 `TESTPOINT_EXTRACT` 共用同一套调度/重试/SSE）。
+3. **`common/ErrorCode` 新增 `E_LLM_EMPTY(50006)`**：区分"结构合法但模型一条都没产出"与"结构不合规"。
+4. **`generation/service/CaseGenerateHandlerTest`（383 行 / 6 例）**：正常落库 / 测试点不存在 / `unit_ref` 缺失 / 空产出 `E_LLM_EMPTY` / `attemptNo = attempts+1` / 重跑裁尾。
+5. **新增两个验收脚本**：`D:/Temp/t07smoke.py`（24 条）、`D:/Temp/t07upsert.py`（7 条，专治真 MySQL 撞键分支）。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 包名用 `testcase` 而不是 `case` | `case` 是 Java 保留字，`package com.aittest.case.domain;` 编译期直接报「需要<标识符>」，不是"不推荐"而是**编译不过** | 没有替代写法：包名本身非法，不能转义、不能靠类名规避（D-38） |
+| `confidence` 语义 = **解析保真度**（`1.000` 正常 / `0.500` 降级 / `NULL` 未评估） | `schema/testcase.schema.json` 的 `items` 是 `additionalProperties: false` 且**没有** `confidence` 字段，模型在结构上写不出来 → "用 draft 自带值"这个分支永远为空 | 在 `CaseDraft` 里加一个恒 `null` 的字段"占位"：只会让人以为"模型会给"（D-39） |
+| `steps` 有损映射，`data` 恒空串 | 让模型编"请求体/入参"只会得到**幻觉数据**（它没有真实接口的字段定义）；要 `data` 应从 `api_operation` 的 parameters 派生或前端补录 | 放宽 `testcase.schema.json` 加 `data` 字段：把幻觉固化进用例库，且 T10 执行导入会当真（D-40） |
+| 新增 `E_LLM_EMPTY(50006)` 而不是复用 `40003` | `40003` 属 4xxxx 段（请求侧"没有可处理的数据"），归错段会让**上游模型问题显示成用户操作问题**，并且这类在监控里消失 | 记 `ok(0)`：任务显示"跑完了但没产出"，真实原因彻底丢失（D-41） |
+| 幂等用 `ON DUPLICATE KEY UPDATE` 而不是 `INSERT IGNORE` | worker 在 `attempts<3` 时会重跑同一 item，撞 `uk_test_case_item_seq` 是**必然**的；`IGNORE` 会静默保留上一次内容，"重试成功"与"内容更新了"变成两件事，日志里没有线索 | `INSERT IGNORE` + 事后比对：多一次读，且仍要判断"该不该覆盖" |
+| upsert 与 `deleteStaleSeqNo` **不加事务** | `execute()` 内有 LLM 调用（分钟级），套事务会把连接按分钟级占住 → 池子很快枯竭（§8.7 第 4 条） | 一个大事务包住两步：用"连接池耗尽"换"极小窗口的一致性"，代价不对称 |
+| `attemptNo = item.attempts + 1`，**不**沿用抽点侧恒写 `1` | 恒 `1` 会让 `llm_call_log.attempt_no` 永远只有 1，**首次通过率永远虚高**、重试成本无法归因 | 与抽点"保持写法一致"：一致性不能高于指标正确性 |
+| `LlmException` 在 handler 里**不 catch** | 瞬态失败（超时/429/上游 5xx）交给 `GenTaskWorker` 的退避重试 3 次；在 handler 里 catch 等于把"可重试"降级成"这条 item 直接失败"，还绕过 `next_run_at` 退避 | handler 内自己重试：重试逻辑写两遍，且与引擎的重试计数互相打架 |
+
+### 踩坑记录
+
+1. **mock 下 `cost_micro=0` 不是"没回写"**。一度按缺陷查，实测根因：`MockLlmProvider` 固定回显 `model="mock-model"`，而 `model_price` 里这一行的**单价种子就是 0/0**（注释写明"成本才能算成 0 而不是查不到单价"）。**判别方法**：先看 `llm_call_log.model` 有没有回显，再看 `model_price` 对应行的单价——两者都在而 `cost_micro=0` 才是问题。`prompt_tokens` / `completion_tokens` / `latency_ms` 本次实测全部非 0（803 / 236 / 1ms 等），是真的。
+2. **直连 mysql CLI 写 `DATETIME` 会按本机时区，与应用 UTC 口径差 8 小时**。在 `t07upsert.py` 里手写 `UPDATE ... status='ACCEPTED'` 后发现 `created_at=07:38`（应用写的 UTC）与 `updated_at=15:40`（CLI 写的本地时间）**并存于同一行**。修法：mysql CLI 加 `--init-command=SET time_zone='+00:00'`。**任何直连库改数据的验收脚本都要带这个**，否则时间列比较是跨时区对比，结论不可信。
+3. **新建验收脚本会连踩四个坑**（都不是产品缺陷，但每写一次都要再踩一遍）：① 数据库口令必须从 `.env` 读、走 `MYSQL_PWD` 传给 `D:/mysql/bin/mysql.exe`（裸 `mysql` 会命中另一份客户端，命令行 `-p` 还会打印不安全告警）；② `DELETE FROM doc_source WHERE id IN (SELECT id FROM doc_source ...)` 触发 MySQL **1093**，要套一层派生表 `IN (SELECT id FROM (...) t)`；③ 上传端点是 `POST /api/docs`（`consumes=multipart/form-data`），**不是** `/docs/upload`；④ `test_point` **没有 `seq_no` 列**，排序要用 `ORDER BY operation_id, id`。
+
+### 验收实录（T07-1）
+
+环境：`AI_PROVIDER=mock`（覆盖 `.env` 里的 `openai-compatible`，`t06preflight` 有硬门禁）+ `-Dserver.port=8097`。
+
+| 项目 | 结果 |
+|---|---|
+| `mvn -o test` | **176 / 0 fail / 0 error / 7 skipped**（基线 170，+6 = `CaseGenerateHandlerTest`） |
+| `t06preflight.py` | **8 PASS / 0 FAIL**，`provider=mock`（硬门禁） |
+| `t07smoke.py` | **24 PASS / 0 FAIL / 0 INCONCLUSIVE**，退出码 0。1 篇 OpenAPI（3 接口）→ 抽出 **9 个测试点** → 建 `CASE_GENERATE` 任务 → 终态 `SUCCESS done=9 total=9 produced=17` → `test_case` **17 行** |
+| `t07upsert.py`（本轮新写） | **7 PASS / 0 FAIL** |
+| `t06negative.py` | **63 PASS / 0 FAIL / 1 WARN / 3 INCONCLUSIVE**，退出码 **2**（绝不折叠成通过） |
+
+**`t07smoke.py` 的断言链**：状态全 `DRAFT`；`prompt_version` 形如 `case_generate.v1`；`content_hash` 64 位 hex；同 item 内 `seq_no` 从 1 连续；每 item `prompt_tokens>0` / `latency_ms>0`；首次执行 `attempts=1`；`item.case_count` 之和 = 行数 = `gen_task.produced_items`；台账 9 行 `CASE_GENERATE` 且 `attempt_no` 从 1 起。
+
+**`t07upsert.py` 为什么必须存在**：`CaseGenerateHandlerTest#rerunTrimsStaleSeqNo` 是纯 Mockito——mapper 被 mock 掉，`ON DUPLICATE KEY UPDATE` 的**撞键分支从未在真 MySQL 上跑过**，而 `t07smoke` 首跑只走 INSERT 分支。本脚本用与 `TestCaseMapper.xml` **逐字一致**的语句跑第二遍，实测：行数不变、`id` 不变、`created_at` 不变、`status` 保持 `ACCEPTED`（**评审结果没被打回 DRAFT**）、`title` 被覆盖、`updated_at` 递增、`deleteStaleSeqNo` 只删 `seq_no > 本次条数` 且**不波及同任务其它 item**（实测其它 item 的 13 行未受影响）。
+
+**NEG-2a 换语义后通过**：非法 `unitRef` → 3 个 item 全部 `E_PARAM_INVALID` 逐条隔离、任务仍收敛到 `FAILED`、无 item 卡在 `PENDING/RUNNING`。
+
+### 新偏差（明细见 §11.1 D-38~D-42）
+
+- **D-38（被动变更）**：包名 `case` → `testcase`。`case` 是 Java 保留字，`package com.aittest.case.domain;` 编译期即报「需要<标识符>」。三层与类名不变，纯命名、无行为差异。
+- **D-39（语义定版）**：`confidence` = **解析保真度**（`1.000` 正常 / `0.500` 降级 / `NULL` 未评估），**不是模型自评置信度、更不是内容质量分**——不得用它做用例排序或抽检依据。`V1__schema.sql` 里那行列注释已过时。
+- **D-40（有意有损）**：`steps` 落库 `[{"no":n,"action":"…","data":""}]`，**`data` 恒空串**。断言它非空会永远红（这是设计）。
+- **D-41（新码 + 线上不可达）**：`E_LLM_EMPTY(50006)` 归"模型输出"族；挂了 schema（`minItems: 1`）时空数组**先**被判 `50005`，**线上看到的是 `50005`**，`50006` 只在无 schema 可校验时兜底。
+- **D-42（观测项，未修）**：任务级 `error_code` 恒 `E_INTERNAL`——item 三条都是 `E_PARAM_INVALID`，任务级仍是 `E_INTERNAL`，前端显示"系统内部错误"。**与 D-25 同类：账本与用户看到的两套码对不上，只看台账的监控正常。**
+
+### 下一步
+
+- **T07-2**：`generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}` —— 三档降级（repair 重试 / 宽松解析落 `confidence=0.500` / 上游 500 重试后置 FAILED）、幂等编排、few-shot 素材库。
+- **T07-3**：前端 4 页面（`TaskList` / `TaskCreateDialog` / `TaskDetail` / `ProgressTimeline`）+ `api/{task.ts,sse.ts}` + `hooks/useTaskStream.ts`（这三个 SSE 文件从 T06 顺延至今**仍未交付**）。
+- **从阶段 8 顺延、仍未闭合**：终态之后新订阅的 emitter 无人 `complete`（**现居遗留清单首位**）；D-33 `Clock` 未注入；D-36 `test_point` 并发插入死锁（观测项）；D-42 任务级 `error_code`（观测项）。
+- **D-41 的边界**：`50006` 线上不可达是设计，但"没有 schema 可校验"那条兜底路径**没有实测**——目前没有任何调用方会走到它。
 
 ---
 

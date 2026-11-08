@@ -377,6 +377,85 @@
 
 ---
 
+## 2026-11-07 · 阶段 8 · T06 异步任务引擎与 SSE 进度
+
+### 做了什么
+
+1. `generation` 模块落地 **15 个后端文件**：`controller/GenTaskController`、`domain/{GenTask,GenTaskItem}`、`dto/{GenTaskCreateReq,GenTaskVO}`、`mapper/{GenTaskMapper,GenTaskItemMapper}`，以及 `service/` 下 8 个类（`GenTaskService` / `GenTaskDispatcher` / `GenTaskWorker` / `ProgressPublisher` / `SseEmitterRegistry` / `TaskItemHandler` / `TaskStateMachine` / `TestPointExtractHandler`）。
+2. **数据库当队列**：`V5__gen_task_item_unit_ref.sql` 给 `gen_task_item` 补 `unit_ref` / `kept_hashes` 与唯一键 `uk_gen_task_item_task_unit`；`GenTaskItemMapper.xml` 手写 `FOR UPDATE SKIP LOCKED` 认领；`GenTaskMapper.xml` 手写原子 `bumpCounters` 与带状态守卫的 `markTerminal`。
+3. **SSE 进度**：首帧 `snapshot` 从 DB 现读，之后 `progress` / `item` / `done`（失败走 `error`）；进度事件 ≥200ms 节流，**终态事件不节流**；`SseEmitterRegistry` 管连接生命周期与断线清理。
+4. **任务状态机集中到 `TaskStateMachine`**：合法流转 `PENDING→RUNNING→{SUCCESS,PARTIAL,FAILED,CANCELED}`，非法流转抛 `E_STATE_ILLEGAL(40901)`；终态由 `terminalOf(total, success)` 推导，部分失败为 `PARTIAL`。
+5. **抽点接入异步引擎**：新增 `TestPointExtractHandler`（按 `unitRef` 定位单元 → `extractUnit` → 写 `kept_hashes`），任务收尾时汇总 `kept` 并**恰好一次**调用 `supersedeMissing`。
+6. **闭合 T05 的临时契约**：`POST /api/testpoints/extract` 从"同步返回 `TestPointExtractReport`"改为立即返回 `{taskId, taskNo}`，进度经 `GET /api/tasks/{id}/stream` 订阅（§6 验收⑦、§11.1 D-26 的临时契约）。
+7. **SSE 鉴权换位置不减量**：`/api/tasks/*/stream` 进 `WebMvcConfig.AUTH_WHITELIST`，改由 `GenTaskController` 自己调 `TokenService.verify(token)` 并校验任务存在。
+8. 改动 4 个既有文件：`WebMvcConfig`（白名单）、`TestPointController`（端点契约）、`TestPointExtractService`（`unitRefsOf`）、`TestPointService`（`keptHashesOfUnitRef`）。
+9. **冒烟已跑通**（`D:/Temp/t06smoke.py`，mock，8097）：抽取端点返 `taskId` / 任务终态 `SUCCESS` / 2 个 item 全部成功 / 测试点落库 / `sourceRef` 为 `operation:` 形态 / 重复抽取不翻倍 / 取消终态任务返 `40901`。**全量单测与端到端回归正在由其他 worker 补，结果待补**。
+
+### 关键决策与理由
+
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| **不引 MQ，用 `gen_task` / `gen_task_item` 当队列表** | 单机部署 + 万级数据量下，MySQL 8 的行锁已经足够；多一个中间件就多一套部署、监控与"消息丢了但任务表还在"的双真源。任务与业务数据同库同事务，进度可直接 SQL 查 | RabbitMQ / Redis Stream（引入运维面 + 两套状态） |
+| **认领时间参数化 `nowUtc`，SQL 禁用 `NOW()` / `CURRENT_TIMESTAMP` / `DATE_ADD` / 时间字面量** | `next_run_at` 的默认值取自**会话时区**，比较基准若也在 SQL 里求，"写"和"读"都跟着会话漂；应用连接钉了 UTC 时碰巧一致，一旦有人用 CLI 排查或连接池配置被改，认领窗口整体偏移 8 小时，表现为"任务迟迟不被认领 / 一次认领过量"，**日志里看不出来** | 在 SQL 里写 `next_run_at <= NOW(3)`（少一个参数，多一个隐性时钟） |
+| **认领方法 `claimBatch` 必须 `@Transactional`** | `FOR UPDATE SKIP LOCKED` 的行锁在**语句结束即释放**。不在事务里，"认领"与"标记 RUNNING" 之间锁已经没了，两个 worker 会拿到同一批 id，`SKIP LOCKED` 形同虚设；`markRunning` 带 `status='PENDING'` 条件与"更新条数 != 入参数量"的 WARN 是这条边界的探针 | 只给 SQL 加锁、不加事务注解（**看起来锁了，实际没锁**） |
+| **状态机集中到 `TaskStateMachine`，非法流转抛 `40901`** | 流转规则散在 service / dispatcher / worker 三处时，每处只写了一半且单看都合理，会出现"worker 置 FAILED、dispatcher 又推回 RUNNING"；静默吞掉非法流转的状态机等于没有状态机 | 各处 `if (status == ...)` 自行判断；或非法流转静默忽略 |
+| **终态写入用带状态守卫的条件更新抢占** | 8 个 worker 可能同时判定"所有 item 都收尾了"。`markTerminal` 带 `AND status IN ('PENDING','RUNNING')`，`won > 0` 才推 `done` / 调 `onTaskFinalize`；否则会重复收尾、重复推 SSE、抽点场景还会重复跑一次 `supersedeMissing` | 先 `selectById` 判状态再无条件 `update`（读-改-写竞态） |
+| **进度用 `bumpCounters` 原子累加 `col = col + n`** | 8 个 worker 同时收尾时"读-改-写"互相覆盖，`done_items` 比实际少、进度条卡住，而每条日志都说"更新成功" | 应用层算好 `setDoneItems(n)` 再整体写回 |
+| **SSE 首帧推 DB 快照，不存内存事件历史** | 断线重连时浏览器自带 `Last-Event-ID`，但服务端若靠内存副本恢复，它与 DB 漂了前端就会显示 98% 而任务其实已结束。快照一律 `snapshotOf()` 从 DB 现读，单机不保存事件历史是**刻意的简化** | 进程内 `List<Event>` 回放环（多实例必失效，且要定容量与淘汰） |
+| **`EventSource` 带不了 header，token 只能走 `?token=`，controller 自己验** | 浏览器的原生 `EventSource` 无法自定义请求头，所以该路径必须在白名单里、改由 `GenTaskController` 调 `TokenService.verify`；**校验没少，只是换了地方**。把它从白名单摘掉会得到"连上就 401"，而控制台只报一个不带上下文的 `EventSource error` | 把 `Authorization` 塞给 `EventSource`（浏览器不支持）；或整条 `/api/tasks/**` 加白名单（把创建/取消一起放开） |
+| **`POST /api/testpoints/extract` 改为 `{taskId, taskNo}`** | T05 阶段同步返回抽取报告是"引擎还没建"时的临时契约（§11.1 D-26），与 §6 验收⑦ 冲突。T06 落地后由 `unitRefsOf(docId)` 建任务、立即返回，抽取语义仍全部由 `TestPointExtractService` / `TestPointService` 保证，`TestPointExtractHandler` **不重写其中任何一环** | 保留同步报告、另加一个异步端点（两套入口、两套去重边界） |
+| **异步化后 `kept` 必须持久化到 `gen_task_item.kept_hashes`，收尾汇总再调文档级 `supersedeMissing`** | 同步路径里 `kept` 是内存中跨单元累加的；异步下每个 item 各自执行、还可能跨进程重启，收尾时只能从库里汇总。少了它就把"没被产出"误判成"消失了"（D-26 同一类事故）。**失败单元**改用 `keptHashesOfUnitRef(docId, unitRef)` 保全原有点——超时 ≠ 原文里没有了 | 每个 item 跑完就调一次 `supersedeMissing`（回到 D-26 的单元互相踩） |
+| **`unit_ref` 用 `sourceRef` 字符串，不新增 `operation_id` / `section_id` 两个外键；可空且取 NULL** | `sourceRef` 已是 T05 的单元规范身份，再加两列是同一概念的第二套表达；重解析后行 id 会变而 `operationId` 字符串稳定。取 NULL 而非 `''` 是因为 MySQL 唯一索引把多个 NULL 视为互不冲突（用例生成场景不填 `unit_ref` 才不会第二条就 1062） | 双 FK + 非空字符串（重解析后失配、同任务多 item 撞唯一键） |
+| **显式 VO，禁实体直出；实体时间 `LocalDateTime`(UTC) → VO 转 `Instant`** | §4.4 硬规则："今天没有敏感字段"不是判据，判据的输入会变。`GenTaskVO` 显式列出 18 个字段，泄露在编译期不可能发生；`Instant.toString()` 小数位浮动会让前端 `dayjs` 解析失败，故 VO 用 `Instant` + 固定 3 位毫秒 + `Z` | `@JsonView` / 实体加 `@JsonIgnore`（判据随字段变化而失效） |
+
+### 踩坑记录
+
+1. **调度器兜底 `catch` 把 NOT NULL 异常吞成"任务不收尾"**：`error_code` / `error_msg` 是 `NOT NULL DEFAULT ''`，收尾时"无错误"传了 `null`，MySQL 严格模式直接拒写；异常冒到 `GenTaskDispatcher.poll()` 的兜底 `catch`，只留一条 `[SCHED] 调度轮询异常` 的 ERROR 日志。症状是 **item 全 SUCCESS、任务却卡在 PENDING**，离根因（数据库列约束）非常远。修正为显式写空串 `""`，`cancel()` 与 `maybeFinalize()` 两处同改。教训：**"保证调度线程不死"的兜底 catch 会同时消灭唯一的证据链**，这类 catch 必须打印完整堆栈（本类已打 `ex`）。
+2. **`WebMvcConfig` 的 Javadoc 里 `{@code /api/tasks/*/stream}` 提前结束了注释块**：`*/` 被编译器当成注释终止符，后面 34 个字符变成裸 Java 代码，报一串 `\u9519\u8bef: \u975e\u6cd5\u5b57\u7b26` 编译错误，报错位置与真正原因完全对不上。改成 `{@code /api/tasks/{@literal *}/stream}` 表述或直接写"任务流端点"。**教训：Javadoc 里出现 `*/` 字面量本身就是语法炸弹**。
+3. **MyBatis-Plus `BaseMapper` 没有 `lambdaUpdate()` 链式**：写成 `genTaskItemMapper.lambdaUpdate()...` 直接编译不过。正确写法是 `genTaskItemMapper.update(null, Wrappers.<GenTaskItem>lambdaUpdate().eq(...).set(...))`——`update(null, wrapper)` 的第一个参数是实体（传 `null` 表示全部用 `set` 子句），`Wrappers` 才是 lambda 更新的入口。
+4. **`TestPointExtractHandler` 曾把两个 FK 传 null，失败单元保全集合为空**：`keptHashesOfUnit(docId, operationId, sectionId)` 需要 `api_operation.id` / `doc_section.id` 两个外键，而 `gen_task_item` 只存 `unit_ref` 字符串。传 null 时查询恒返空集 → 失败单元的原有测试点被 `supersedeMissing` 整批置 `SUPERSEDED`，**一次模型超时静默废掉有效测试点**（与 D-26 同病）。改为按 `sourceRef` 匹配：`TestPointService.keptHashesOfUnitRef(docId, unitRef)`。
+5. **`@AssertTrue` 包路径写错 / `AuthContext` API 名写错 / `ErrorCode.code()` 与 `getCode()` 不一致**：三者都是编译期问题，但报错分散在 DTO、controller、异常分支三处，容易被误判成"某处业务逻辑写错了"。实际都是**照着记忆写 API 名**：`jakarta.validation.constraints.AssertTrue`（不是 `javax`）、`AuthContext.requireUserId()`、`ErrorCode` 的 `code()` 由 `CodedEnum` 提供而枚举自身是 `name()` / `getCode()`。凡涉及枚举与上下文 API，先 `grep` 一次定义再写。
+6. **终态抢占与任务级收尾的顺序**：`onTaskFinalize` 必须在 `markTerminal` **之前**跑，但它本身失败只打 ERROR 不阻断；若顺序反过来，`supersedeMissing` 会在任务已终态后再改测试点，前端 `done` 事件已经发出，用户看到的是"完成了但列表又变了"。
+7. **冒烟脚本必须自己清数据**：与 T05 同一个坑——`DocService` 对同名同哈希文件"命中缓存秒回"复用 `docId`，上一轮的 `test_point` 会串进本轮"重复抽取不翻倍"的计数断言。`t06smoke.py` 每次上传用独立的 OpenAPI 内容并以新 `doc_id` 做作用域。
+
+### 下一步
+
+- ~~补 T06 的**全量单测与端到端回归**~~ **→ 已闭合**：见下方「验收实录」，全量单测 165 条 0 失败、`t06smoke`/`t06sse`/`t05e2e_async`/`t06negative`/`t06deadlock_stress` 全跑完（`t06negative` 3 条 INCONCLUSIVE 已由确定性单测替代，1 条 WARN 登记 T07）。
+- **T07 用例生成编排**（未变，仍是下一阶段主体）：`generation/orchestrator/{CaseGenerateOrchestrator,RetryPolicy,DegradePolicy,GenerationContext}`，复用 `TaskItemHandler` 注册 `CASE_GENERATE` 场景；`test_point → test_case` 外键与三档降级（坏 JSON 修复 / 宽松解析 `confidence=0.5` / 上游 500 重试后置 FAILED）。
+- 前端（**未闭合，进 T07**）：评审页补**批量采纳**与"跳到原文"；任务列表页 / 任务详情页接 SSE（`frontend/src/api/{task.ts,sse.ts}`、`hooks/useTaskStream.ts` 这三个文件 T06 尚未交付）。
+- 回改 §6 T06 的 ⑧⑨⑩（**未闭合，见 §11.1 D-33**）：当前 `nowUtc` 由 `LocalDateTime.now(ZoneOffset.UTC)` 硬取，尚未注入 `Clock` bean。
+- **进 T07 的遗留清单**（本次验收新增/加强）：**D-35 SSE 错误响应在浏览器式 `Accept` 下退化为 500 空 body（放首位）**、终态之后新订阅的 emitter 无人 `complete`（`ProgressPublisher.finish()` 只关"当时那批连接"，30 分钟超时兜底）、D-36 `test_point` 并发插入死锁（观测项）；以及既有 P1 重复取消幂等短路（会重放终态事件）、P2 `create` 缺二选一校验、`shouldPushProgress` 非原子、手工补点 `source_ref=""`、`created_by` 历史 NULL 放行、D-33 `Clock` 未注入。
+
+### 验收实录（阶段 8 收口数据）
+
+环境：`AI_PROVIDER=mock` + `-Dserver.port=8097`，Flyway 停在 **v6**。
+
+| 项目 | 结果 |
+|---|---|
+| `t06preflight.py`（GATE 0） | **8/8 PASS**（V6 已 apply / `unit_ref=varchar(200)` / `produced_items` 存在 / `error_msg` NOT NULL / `source_ref` 200 / `path` 500 / 唯一索引在 / **生效 provider=mock**） |
+| `t06smoke.py` | **12/12 PASS**（终态 SUCCESS、item 数=接口数、落库、`operation:` sourceRef、重复抽取不翻倍、取消终态 40901） |
+| `t06sse.py` | **39/39 PASS**（首帧 snapshot 14 字段、`total`=接口数、progress/item 帧、`done` 终态帧、`Last-Event-ID` 重连拿 DB 快照、无 token 401 不挂死） |
+| `t05e2e_async.py` | **106/106 PASS**（T05 语义全迁移：去重不翻倍、幽灵点置 SUPERSEDED 不删除、人工修订/停用重抽后保住、`done=success+failed+skipped` 从子表现读） |
+| `t06negative.py` | **59 PASS / 0 FAIL / 1 WARN / 3 INCONCLUSIVE**，退出码 **2** |
+| `t06deadlock_stress.py`（新增） | **8/8** 与 **16/16** 并发建任务全成功、全部收敛、死锁日志 0 |
+| 全量单测 | **165 / 0 fail / 0 error / 7 skipped**（`BUILD SUCCESS`） |
+
+**3 条 INCONCLUSIVE 及确定性替代**（均为「未验证」而非通过，不得据此写"测试全绿"）：
+
+1. NEG-1 in-flight 竞态黑盒未复现 → 由 `CancelInFlightRaceTest` 的 `CountDownLatch` 确定性覆盖（含正对照）。
+2. NEG-3 `getMessage()==null` 黑盒不可达 → 新增 `GenTaskWorkerTest` 用例（stub handler 抛无 message 的 `NullPointerException`，断言 `error_msg` 非空、item 不卡 RUNNING）。
+3. NEG-7 owner 不匹配分支 → 库里 `gen_task.created_by` 有外键 `fk_gen_task_created_by → app_user.id` 且只有 admin 一个用户，构造"别人的任务"需插 `app_user` 行或关 FK 检查，两条都不走 → 新增 `GenTaskControllerStreamAuthTest` 覆盖（7 例：空 token 短路（`null` 与空白各一例，且 `verify` 零调用）/ owner 不匹配 40301 且 register/pushSnapshot/complete 全部 never / owner 匹配 / `createdBy=NULL` 放行 / 终态任务推完快照即 complete / 终态 `CANCELED` 的 `InOrder` 顺序（register→pushSnapshot→complete，防快照被关流吞掉））。
+
+**1 条 WARN**：NEG-5「终态之后新订阅的 emitter 无人 `complete`」，属 `ProgressPublisher.finish()` 只关"当时那批连接"的已知窗口，30 分钟超时兜底，登记 T07。
+
+### 新偏差（本轮验收抓出，明细见 §11.1 D-34~D-36）
+
+- **D-34（已修复 + 已压测验证）**：建任务子项插入的 InnoDB 死锁 —— `create()` 逐条 `insert`（60 条 = 60 个提交点）与 `claimBatch()` 在两张表上锁序交叉，实测修复前同一实例 **30 次建任务 2 次失败（≈6.7%）**。修复三件套（`TransactionTemplate` 独立事务 / `PessimisticLockingFailureException` 有界重试 / 去掉 `UPDATE` 子查询）后自然流量 19 次 0 失败、8×60 与 16×60（960 插入）压测全成功、死锁日志 0。
+- **D-35（未修，进 T07 首位）**：`@GetMapping(produces=text/event-stream)` 下异常响应内容协商失败 → 浏览器式 `Accept` 得到 **HTTP 500 + 空 body**，真实 `EventSource` 场景下 token 过期无法区分"鉴权失败"与"服务崩了"，且会无限重连。
+- **D-36（观测项，未专门处理）**：修复后实例仍有 3 次 `Deadlock found` 落在 `INSERT INTO test_point`，由 item 级 `attempts` 重试吸收，未观察到任务失败。**不写成"已解决"。**
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

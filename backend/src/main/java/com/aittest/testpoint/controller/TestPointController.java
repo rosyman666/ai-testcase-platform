@@ -5,7 +5,8 @@ import com.aittest.common.PageQuery;
 import com.aittest.common.PageResult;
 import com.aittest.testpoint.dto.BatchStatusReq;
 import com.aittest.testpoint.dto.TestPointCreateReq;
-import com.aittest.testpoint.dto.TestPointExtractReport;
+import com.aittest.common.enums.TaskScene;
+import com.aittest.generation.service.GenTaskService;
 import com.aittest.testpoint.dto.TestPointUpdateReq;
 import com.aittest.testpoint.dto.TestPointVO;
 import com.aittest.testpoint.service.TestPointExtractService;
@@ -21,18 +22,20 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 测试点接口（§4.2 第 14~18 号端点）。
  *
- * <p><b>本控制器有一处刻意的临时契约</b>（§11.1 D-26）：{@code POST /api/testpoints/extract}
- * 设计上应立即返回 {@code {taskId}} 并把抽取交给异步引擎（§9 决策 5，与用例生成共用），
- * 但那套引擎是 <b>T06</b> 的交付物。T05 阶段本端点<b>同步返回抽取报告</b>，
- * 换来的是"改动可立刻看到结果"的开发反馈速度。T06 落地后改回 {@code {taskId}} + SSE。</p>
+ * <p><b>T06 起 {@code POST /api/testpoints/extract} 立即返回 {@code {taskId}}</b>（验收⑦），
+ * 抽取交给异步引擎（§9 决策 5，与用例生成共用同一套调度/退避/SSE）。
+ * 进度经 {@code GET /api/tasks/{taskId}/stream} 订阅。T05 阶段这里曾同步返回抽取报告，
+ * 那是"引擎还没有"时的临时契约（§11.1 D-26），现已随 T06 落地而收口。</p>
  *
- * <p><b>为什么不先造个临时任务表撑住 {@code taskId} 契约</b>：假的 taskId 只能取悦接口文档。
- * 它要么指向一张空表（前端转圈转到超时），要么指向一个临时实现（T06 要拆掉重写）。
- * 同步返回报告是"事实如此"，伪造 taskId 是"文档如此"——我们选前者。</p>
+ * <p><b>切分规则仍由 {@code ExtractPlanner} 说了算</b>：本方法只消费它给出的单元清单来建任务，
+ * 不重新实现切分——否则同一个 docId 在"建任务"与"执行"两个时刻可能切出不同的单元。</p>
  *
  * @author 寇豆码
  */
@@ -47,23 +50,34 @@ public class TestPointController {
     /** 抽取服务。 */
     private final TestPointExtractService testPointExtractService;
 
+    /** 任务服务（抽取走异步引擎，验收⑦）。 */
+    private final GenTaskService genTaskService;
+
     public TestPointController(TestPointService testPointService,
-                               TestPointExtractService testPointExtractService) {
+                               TestPointExtractService testPointExtractService,
+                               GenTaskService genTaskService) {
         this.testPointService = testPointService;
         this.testPointExtractService = testPointExtractService;
+        this.genTaskService = genTaskService;
     }
 
     /**
-     * 触发抽取（T05 同步实现，T06 改异步）。
+     * 触发抽取：<b>立即返回 {@code taskId}</b>，不等执行（验收①⑦）。
      *
      * @param docId 文档 ID
-     * @return 抽取汇总报告
+     * @return {@code {taskId, taskNo}}
      */
     @PostMapping("/extract")
     @Operation(summary = "触发测试点抽取",
-            description = "T05 阶段同步返回抽取报告；T06 起改为返回 taskId 并走 SSE 进度（§11.1 D-26）")
-    public ApiResponse<TestPointExtractReport> extract(@RequestParam("docId") Long docId) {
-        return ApiResponse.ok(testPointExtractService.extractDocument(docId));
+            description = "立即返回 taskId，抽取由异步引擎执行；进度经 GET /api/tasks/{taskId}/stream 订阅（验收⑦）")
+    public ApiResponse<Map<String, String>> extract(@RequestParam("docId") Long docId) {
+        List<String> unitRefs = testPointExtractService.unitRefsOf(docId);
+        Long taskId = genTaskService.create(TaskScene.TESTPOINT_EXTRACT, docId, null, null,
+                unitRefs, null);
+        Map<String, String> data = new LinkedHashMap<>();
+        data.put("taskId", String.valueOf(taskId));
+        data.put("taskNo", genTaskService.require(taskId).getTaskNo());
+        return ApiResponse.ok(data);
     }
 
     /**

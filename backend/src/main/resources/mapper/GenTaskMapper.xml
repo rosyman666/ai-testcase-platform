@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  gen_task 的进度写入语句。
+
+  ## 为什么这四条要手写
+  1. bumpCounters 必须是 **= col + n** 的原子累加。8 个 worker 同时收尾时"读-改-写"
+     会互相覆盖，表现为 done_items 比实际少、进度条卡住不动，而每条日志都说"更新成功"。
+     produced 累加到 produced_items（V6），不碰 accepted_cases（T07 采纳数）。
+  2. progress 是冗余字段，只有 ProgressPublisher 写它（见 GenTask 类注释）。
+  3. markTerminal 带 status 守卫，是并发收尾的抢占点；返回 0 表示没抢到收尾权。
+  4. markRunningByItemIds 带 AND status='PENDING' 守卫，只在首次认领时写 started_at。
+
+  ## 时间字段
+  started_at / finished_at 由应用侧算好绑定（业务事件）；updated_at 交给
+  ON UPDATE CURRENT_TIMESTAMP(3)。created_at/updated_at 一律不在这里出现。
+  比较基准 nowUtc 也由应用侧传入，SQL 里不出现 NOW()/CURRENT_TIMESTAMP（验收⑧）。
+-->
+<mapper namespace="com.aittest.generation.mapper.GenTaskMapper">
+
+    <update id="bumpCounters">
+        UPDATE gen_task
+           SET done_items     = done_items + #{done},
+               success_items  = success_items + #{success},
+               failed_items   = failed_items + #{failed},
+               produced_items = produced_items + #{produced}
+         WHERE id = #{id}
+    </update>
+
+    <update id="updateProgress">
+        UPDATE gen_task
+           SET progress = #{progress}
+         WHERE id = #{id}
+    </update>
+
+    <!-- 置终态。带 status 守卫（只允许从非终态写入）：8 个 worker 可能同时判定
+         "所有 item 都跑完了"，没有守卫就会重复收尾、重复推 done 事件、重复调
+         onTaskFinalize（抽点场景下那会重复跑一次 supersedeMissing，且取消竞态下
+         会带着残缺的 kept 误取代整篇文档的测试点）。 -->
+    <update id="markTerminal">
+        UPDATE gen_task
+           SET status      = #{status},
+               error_code  = #{errorCode},
+               error_msg   = #{errorMsg},
+               finished_at = #{finishedAt}
+         WHERE id = #{id}
+           AND status IN ('PENDING', 'RUNNING')
+    </update>
+
+    <!-- 首次认领后置 RUNNING。显式收 taskIds，不在 UPDATE 里内联 gen_task_item 子查询：
+         子查询会对已在本事务里被排他锁住的 item 行再加共享锁，与建任务侧的 INSERT
+         形成锁序交叉（建任务死锁的另一半根因）。taskIds 由 claimBatch 用不加锁的
+         快照读 selectTaskIdsByItemIds 取得。 -->
+    <update id="markRunningByItemIds">
+        UPDATE gen_task
+           SET status     = 'RUNNING',
+               started_at = #{nowUtc}
+         WHERE status = 'PENDING'
+           AND id IN
+        <foreach collection="taskIds" item="tid" open="(" separator="," close=")">
+            #{tid}
+        </foreach>
+    </update>
+
+    <select id="selectExpiredTaskIds" resultType="java.lang.Long">
+        SELECT id
+          FROM gen_task
+         WHERE deadline_at IS NOT NULL
+           AND deadline_at &lt; #{nowUtc}
+           AND status IN ('PENDING', 'RUNNING')
+    </select>
+</mapper>

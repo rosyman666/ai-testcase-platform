@@ -69,6 +69,14 @@ spring:
   mvc:
     # 未匹配到 handler 时抛 NoHandlerFoundException，交由 T02 的 GlobalExceptionHandler 统一映射为 40401
     throw-exception-if-no-handler-found: true
+  task:
+    scheduling:
+      pool:
+        # I10：默认的单线程 scheduler 让 GenTaskDispatcher.poll()(500ms) 与
+        # SseEmitterRegistry.heartbeat()(20s) 共用一根线程；AsyncConfig 的
+        # CallerRunsPolicy 在队列满时会让调度线程同步跑几十秒 LLM，心跳与轮询一起停摆。
+        # 给 2 根线程即可把心跳与轮询隔开（不引入第二套 scheduler，避免并存方案）。
+        size: 2
 
 # ---------------------------------------------------------------------------
 # MyBatis-Plus：分页、乐观锁、逻辑删除、字段自动填充在 T02 的 MybatisPlusConfig 中注册

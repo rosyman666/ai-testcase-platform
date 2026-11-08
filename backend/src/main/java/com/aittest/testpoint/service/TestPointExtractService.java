@@ -132,6 +132,81 @@ public class TestPointExtractService {
     }
 
     /**
+     * 同 {@link #extract}，但<b>额外返回本单元产出的去重键</b>。
+     *
+     * <p>异步引擎（T06）需要把这批键持久化到 {@code gen_task_item.kept_hashes}，
+     * 因为收尾时的 {@code supersedeMissing} 要拿"本轮产出的全集"当 {@code kept}——
+     * 同步路径里它在内存中跨单元累加，异步下 item 各自执行还可能跨进程重启，
+     * 只能落库（见 §11.1 D-26）。同步调用方仍用 {@link #extract} 即可。</p>
+     *
+     * @param unit 待分析单元
+     * @return 结果 + 去重键
+     */
+    public UnitResult extractUnit(ExtractUnit unit) {
+        return extractUnit(unit, null, null);
+    }
+
+    /**
+     * 同 {@link #extractUnit(ExtractUnit)}，但额外把<b>任务上下文</b>透传进成本台账。
+     *
+     * <p><b>T06 异步链路专用</b>：{@code LlmRequest.taskId / taskItemId} 是"只用于记账"
+     * 的字段（见 {@code LlmRequest} 类注释），{@code LoggingLlmProvider} 除了请求对象
+     * 什么都看不到。异步引擎手里同时有 {@code task.getId()} 与 {@code item.getId()}，
+     * 必须在这里传进来，否则 {@code llm_call_log} 这两列恒 NULL——T11 成本按 task
+     * 视角求和、按任务清理台账、T07 逐 item 回写佐证全部失去依据。</p>
+     *
+     * <p><b>同步路径传 null 合法</b>：{@link #extract(ExtractUnit)} 与
+     * {@link #extractDocument(Long)} 没有任务上下文，两个参数留 null 即可；
+     * {@code LlmRequest} 的这两个字段本身声明为可空，不改变 T05 的既有语义。</p>
+     *
+     * <p>{@code attemptNo} 仍按 1 记账（异步重试的真实次数归因留 T07，见本批
+     * 收口说明）：改动它需要把 item 的 attempts 再透一层进 {@code ExtractUnit}，
+     * 收益低于跨 T04/T05/T06 的改动面。</p>
+     *
+     * @param unit       待分析单元
+     * @param taskId     关联任务 ID（同步路径为 null）
+     * @param taskItemId 关联任务子项 ID（同步路径为 null）
+     * @return 结果 + 去重键
+     */
+    public UnitResult extractUnit(ExtractUnit unit, Long taskId, Long taskItemId) {
+        UnitOutcome outcome = safeExtract(unit, taskId, taskItemId);
+        return new UnitResult(outcome.result(), outcome.hashes());
+    }
+
+    /**
+     * 取一篇文档的待分析单元定位清单（供异步引擎建 item 用）。
+     *
+     * <p>T06 把抽取搬进 {@code gen_task} 后，"切成哪几个单元"仍由 {@link ExtractPlanner}
+     * 说了算——任务创建只消费它给出的 {@code sourceRef}，<b>不重新实现切分规则</b>，
+     * 否则同一个 docId 在"建任务"与"执行"两个时刻可能切出不同的单元。</p>
+     *
+     * @param docId 文档
+     * @return 单元定位（{@code operation:xxx} / {@code section:n}），顺序与规划一致
+     * @throws com.aittest.common.BizException 文档不存在
+     */
+    public java.util.List<String> unitRefsOf(Long docId) {
+        DocSource doc = docSourceMapper.selectById(docId);
+        if (doc == null) {
+            throw com.aittest.common.BizException.notFound("需求文档");
+        }
+        java.util.List<String> refs = new ArrayList<>();
+        for (ExtractUnit unit : extractPlanner.plan(doc)) {
+            refs.add(unit.sourceRef());
+        }
+        return refs;
+    }
+
+    /**
+     * 一个单元的对外产出：结果 + 去重键（{@code extractUnit} 专用）。
+     *
+     * @param result     逐单元结果
+     * @param keptHashes 本单元产出（含命中已有行）的去重键；失败时是该单元原有点的键（保全用）
+     * @author 寇豆码
+     */
+    public record UnitResult(TestPointExtractResult result, Set<String> keptHashes) {
+    }
+
+    /**
      * 抽取一整篇文档：切成 N 个单元逐个抽取，汇总成报告。
      *
      * <p><b>切分规则</b>（验收 ①②）：OpenAPI 文档按 {@code api_operation} 逐个单元——
@@ -189,8 +264,21 @@ public class TestPointExtractService {
      * @return 成功 → 结果 + 去重键；失败 → {@code failed(...)} + 该单元原有点的去重键
      */
     private UnitOutcome safeExtract(ExtractUnit unit) {
+        return safeExtract(unit, null, null);
+    }
+
+    /**
+     * 带任务上下文的安全边界：两个 id 一路透到 {@link #doExtract} 的
+     * {@code LlmRequest}，失败分支"保留原有点"的逻辑与同步路径完全一致。
+     *
+     * @param unit       待分析单元
+     * @param taskId     关联任务 ID（同步路径为 null）
+     * @param taskItemId 关联任务子项 ID（同步路径为 null）
+     * @return 成功 → 结果 + 去重键；失败 → {@code failed(...)} + 该单元原有点的去重键
+     */
+    private UnitOutcome safeExtract(ExtractUnit unit, Long taskId, Long taskItemId) {
         try {
-            return doExtract(unit);
+            return doExtract(unit, taskId, taskItemId);
         } catch (LlmException ex) {
             log.warn("[TESTPOINT] 单元抽取失败，保留该单元原有测试点 sourceRef={} 错误码={} 原因={}",
                     unit.sourceRef(), ex.getErrorCode(), ex.getMessage());
@@ -223,11 +311,13 @@ public class TestPointExtractService {
      * 前者进报告，后者由 {@link #extractDocument(Long)} 汇总后交给
      * {@code supersedeMissing}。两者来自同一次落库，拆开返回就等于让调用方重新猜一遍。</p>
      *
-     * @param unit 待分析单元
+     * @param unit       待分析单元
+     * @param taskId     关联任务 ID（只用于记账，同步路径为 null）
+     * @param taskItemId 关联任务子项 ID（只用于记账，同步路径为 null）
      * @return 成功结果 + 本单元产出的去重键
      * @throws LlmException 模型/解析/schema 任一环节失败
      */
-    private UnitOutcome doExtract(ExtractUnit unit) {
+    private UnitOutcome doExtract(ExtractUnit unit, Long taskId, Long taskItemId) {
         PromptTemplate template = promptTemplateService.activeOf(TEMPLATE_CODE);
         String schemaPath = template.getOutputSchema();
 
@@ -242,6 +332,9 @@ public class TestPointExtractService {
 
         LlmRequest request = LlmRequest.builder()
                 .scene(TaskScene.TESTPOINT_EXTRACT.code())
+                // 只用于记账：异步路径带任务/子项 id，同步路径为 null（字段本身可空）
+                .taskId(taskId)
+                .taskItemId(taskItemId)
                 .attemptNo(1)
                 .message(LlmMessage.user(rendered))
                 .temperature(aiProperties.getTemperature().getTestpoint())

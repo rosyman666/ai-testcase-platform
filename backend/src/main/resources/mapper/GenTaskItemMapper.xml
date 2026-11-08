@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  gen_task_item 的队列语句。BaseMapper 拼不出 FOR UPDATE SKIP LOCKED，故认领必须手写。
+
+  ## 时间字段的两种来源（不要混）
+  - created_at / updated_at：**交给数据库**（DEFAULT / ON UPDATE CURRENT_TIMESTAMP(3)），
+    会话时区已由 JDBC 钉在 +00:00。应用侧填 = 引入 JVM 时钟这第二个来源。
+  - next_run_at / started_at / finished_at：**由应用侧计算后绑定**，因为它们是业务事件
+    （什么时候该跑、什么时候跑完），不是审计列。尤其 next_run_at 是认领比较基准，
+    必须和比较时用的 nowUtc 同源——否则退避间隔会被会话时区偷偷改写。
+
+  ## 认领语句的两条硬约束（验收②⑧）
+  1. 比较基准 nowUtc 由调用方传入，**SQL 里不得出现 NOW()/CURRENT_TIMESTAMP/DATE_ADD/
+     任何时间字面量**。next_run_at 的 DEFAULT 取自会话时区，比较基准若也在 SQL 里求，
+     "写"和"读"都跟会话漂——认领窗口整体偏移，且日志里看不出来。
+  2. 必须在事务里调用（@Transactional），否则行锁在语句结束即释放，SKIP LOCKED 等于没用。
+-->
+<mapper namespace="com.aittest.generation.mapper.GenTaskItemMapper">
+
+    <!-- 认领：行锁跳过已被人锁住的行，天然支持多线程/多实例 -->
+    <select id="claimPending" resultType="java.lang.Long">
+        SELECT id
+          FROM gen_task_item
+         WHERE status = 'PENDING'
+           AND next_run_at &lt;= #{nowUtc}
+         ORDER BY id
+         LIMIT #{limit}
+           FOR UPDATE SKIP LOCKED
+    </select>
+
+    <!-- 认领后置 RUNNING。带 status='PENDING' 是竞态探针：更新条数 != 入参数量
+         说明有别的 worker 抢走了同一批行，那是事务边界写错的信号 -->
+    <update id="markRunning">
+        UPDATE gen_task_item
+           SET status     = 'RUNNING',
+               worker_id  = #{workerId},
+               started_at = #{nowUtc}
+         WHERE status = 'PENDING'
+           AND id IN
+        <foreach collection="ids" item="it" open="(" separator="," close=")">
+            #{it}
+        </foreach>
+    </update>
+
+    <!-- 失败退避：退回 PENDING 并把 next_run_at 后移，不靠 sleep 占线程 -->
+    <update id="rescheduleForRetry">
+        UPDATE gen_task_item
+           SET status       = 'PENDING',
+               attempts     = #{attempts},
+               next_run_at  = #{nextRunAt},
+               worker_id    = '',
+               error_code   = #{errorCode},
+               error_msg    = #{errorMsg}
+         WHERE id = #{id}
+    </update>
+
+    <!-- 超时回收（I7）：worker 崩溃后 RUNNING item 永停，maybeFinalize 因 running>0 永不收尾。
+         由 GenTaskDispatcher 每 60s 节流调用；error_code/error_msg 是 NOT NULL 列，必须非空。 -->
+    <update id="failRunningItemsOfTask">
+        UPDATE gen_task_item
+           SET status      = 'FAILED',
+               error_code  = #{errorCode},
+               error_msg   = #{errorMsg},
+               finished_at = #{nowUtc},
+               attempts    = attempts + 1
+         WHERE task_id = #{taskId}
+           AND status = 'RUNNING'
+    </update>
+
+    <!-- 超时回收（I7 PENDING 收口）：deadline 已过的任务可能还有 PENDING item
+         （退避中 / 未认领），只回收 RUNNING 会让 maybeFinalize 因 pending>0 永不收敛、
+         回收器每 60s 空转。error_code/error_msg 非空（NOT NULL 列）；
+         attempts 不 +1 —— 这条 item 本轮没执行过。 -->
+    <update id="failPendingItemsOfTask">
+        UPDATE gen_task_item
+           SET status      = 'FAILED',
+               error_code  = #{errorCode},
+               error_msg   = #{errorMsg},
+               finished_at = #{nowUtc}
+         WHERE task_id = #{taskId}
+           AND status = 'PENDING'
+    </update>
+
+    <select id="countByStatus" resultType="java.util.HashMap">
+        SELECT status AS status, COUNT(*) AS cnt
+          FROM gen_task_item
+         WHERE task_id = #{taskId}
+         GROUP BY status
+    </select>
+
+    <!-- 认领后置任务 RUNNING 用：按 item id 反查去重任务 id。
+         刻意不加 FOR UPDATE —— 要的是 MVCC 快照读。调用方 claimBatch 已持有这些 item
+         行的排他锁，再叠共享锁会与建任务侧 INSERT 形成锁序交叉（死锁根因之一）。 -->
+    <select id="selectTaskIdsByItemIds" resultType="java.lang.Long">
+        SELECT DISTINCT task_id
+          FROM gen_task_item
+         WHERE id IN
+        <foreach collection="itemIds" item="it" open="(" separator="," close=")">
+            #{it}
+        </foreach>
+    </select>
+</mapper>

@@ -26,6 +26,12 @@ public class WebMvcConfig implements WebMvcConfigurer {
      *   <li>{@code /api/auth/login}——登录本身；</li>
      *   <li>{@code /api/config/public}、{@code /api/dict/**}——登录页渲染所需字典，
      *       拦截会导致"登录页拿不到字典"的死锁；</li>
+     *   <li>{@code /api/tasks/{id}/stream}——<b>SSE 订阅</b>。浏览器的 {@code EventSource}
+     *       <b>无法自定义请求头</b>，只能把 token 放查询串，因此该路径必须放行
+     *       {@code Authorization} 校验，改由 {@code GenTaskStreamController} 自己调
+     *       {@code TokenService.verify(token)}（见 §4.3）。<b>注意这不是"免鉴权"</b>——
+     *       校验没少，只是换了地方；把它从白名单摘掉会得到"连上就 401"，
+     *       而浏览器控制台只报一个不带上下文的 EventSource error；</li>
      *   <li>{@code /error}、{@code /actuator/**}、{@code /v3/api-docs/**}、{@code /swagger-ui/**}
      *       ——容器错误页、运维与接口文档。</li>
      * </ul>
@@ -35,6 +41,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
             "/api/auth/login",
             "/api/config/public",
             "/api/dict/**",
+            "/api/tasks/*/stream",
             "/actuator/**",
             "/v3/api-docs/**",
             "/swagger-ui/**",

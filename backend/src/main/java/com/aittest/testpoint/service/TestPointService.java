@@ -423,6 +423,30 @@ public class TestPointService {
     }
 
     /**
+     * 按 {@code source_ref} 取某单元当前已有的测试点去重键（<b>失败保全</b>用）。
+     *
+     * <p>与 {@link #keptHashesOfUnit} 等价，但按 {@code source_ref} 匹配。
+     * 异步引擎的 {@code gen_task_item} 只存了 {@code unit_ref} 字符串（不存 FK，
+     * 理由见 {@code GenTaskItem.unitRef} 注释），失败保全时只能这样反查。</p>
+     *
+     * @param docId     文档
+     * @param sourceRef 单元定位，如 {@code operation:createUser} / {@code section:3}
+     * @return 该单元所有测试点的去重键
+     */
+    public Set<String> keptHashesOfUnitRef(Long docId, String sourceRef) {
+        if (sourceRef == null || sourceRef.isBlank()) {
+            return Set.of();
+        }
+        Set<String> hashes = new HashSet<>();
+        for (TestPoint row : testPointMapper.selectByDocId(docId)) {
+            if (sourceRef.equals(row.getSourceRef())) {
+                hashes.add(row.getContentHash());
+            }
+        }
+        return hashes;
+    }
+
+    /**
      * 组装实体。
      *
      * <p><b>{@code sourceRef} 用入参而不是 {@code draft.sourceRef()}</b>：模型可能把来源写错

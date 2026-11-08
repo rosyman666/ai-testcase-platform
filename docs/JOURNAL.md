@@ -529,6 +529,8 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 **`t07smoke.py` 的断言链**：状态全 `DRAFT`；`prompt_version` 形如 `case_generate.v1`；`content_hash` 64 位 hex；同 item 内 `seq_no` 从 1 连续；每 item `prompt_tokens>0` / `latency_ms>0`；首次执行 `attempts=1`；`item.case_count` 之和 = 行数 = `gen_task.produced_items`；台账 9 行 `CASE_GENERATE` 且 `attempt_no` 从 1 起。
 
+**已知边界（T07-2）**：三档降级未接（`parsed.truncated()` 只打 WARN，`confidence` 由服务端定 `1.000`）、`{{few_shot}}` 传空串（素材库未建）。
+
 **`t07upsert.py` 为什么必须存在**：`CaseGenerateHandlerTest#rerunTrimsStaleSeqNo` 是纯 Mockito——mapper 被 mock 掉，`ON DUPLICATE KEY UPDATE` 的**撞键分支从未在真 MySQL 上跑过**，而 `t07smoke` 首跑只走 INSERT 分支。本脚本用与 `TestCaseMapper.xml` **逐字一致**的语句跑第二遍，实测：行数不变、`id` 不变、`created_at` 不变、`status` 保持 `ACCEPTED`（**评审结果没被打回 DRAFT**）、`title` 被覆盖、`updated_at` 递增、`deleteStaleSeqNo` 只删 `seq_no > 本次条数` 且**不波及同任务其它 item**（实测其它 item 的 13 行未受影响）。
 
 **NEG-2a 换语义后通过**：非法 `unitRef` → 3 个 item 全部 `E_PARAM_INVALID` 逐条隔离、任务仍收敛到 `FAILED`、无 item 卡在 `PENDING/RUNNING`。

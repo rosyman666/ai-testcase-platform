@@ -185,13 +185,16 @@ public class CaseService {
     private void applySort(LambdaQueryWrapper<TestCase> wrapper, PageQuery query) {
         String column = query.sortColumnOrDefault("created_at");
         boolean desc = query.isDesc();
+        // MP 的 orderBy(condition, isAsc, column) 第二参是 **isAsc** 不是 isDesc：
+        // 直接把 isDesc() 传进去会把默认排序翻成 ASC（最新用例排到最后）。
+        boolean isAsc = !desc;
         switch (column) {
-            case "updated_at" -> wrapper.orderBy(true, desc, TestCase::getUpdatedAt);
-            case "title" -> wrapper.orderBy(true, desc, TestCase::getTitle);
-            case "priority" -> wrapper.orderBy(true, desc, TestCase::getPriority);
-            case "status" -> wrapper.orderBy(true, desc, TestCase::getStatus);
-            case "seq_no" -> wrapper.orderBy(true, desc, TestCase::getSeqNo);
-            default -> wrapper.orderBy(true, desc, TestCase::getCreatedAt);
+            case "updated_at" -> wrapper.orderBy(true, isAsc, TestCase::getUpdatedAt);
+            case "title" -> wrapper.orderBy(true, isAsc, TestCase::getTitle);
+            case "priority" -> wrapper.orderBy(true, isAsc, TestCase::getPriority);
+            case "status" -> wrapper.orderBy(true, isAsc, TestCase::getStatus);
+            case "seq_no" -> wrapper.orderBy(true, isAsc, TestCase::getSeqNo);
+            default -> wrapper.orderBy(true, isAsc, TestCase::getCreatedAt);
         }
         wrapper.orderByDesc(TestCase::getId);
     }

@@ -386,8 +386,16 @@ public class GenTaskService {
      *
      * <p><b>按 {@code id ASC} 排</b>（不是 {@code created_at}）：子项是批量 INSERT 进来的，
      * 一次插入的几十行 {@code created_at} 很可能是<b>同一个毫秒</b>，按它排序结果不确定；
-     * 而雪花 ID 单调递增，等价于插入顺序，也就等价于 {@code unitRef} 的抽取顺序
-     * （{@code create} 按 {@code unitRefs} 的顺序逐条组装）。</p>
+     * 而雪花 ID 单调递增，等价于插入顺序。</p>
+     *
+     * <p><b>这是"插入顺序"，不是 {@code unitRef} 字典序</b>——本次核查过
+     * {@code insertItems}：它按 {@code unitRefs}/{@code testPointIds} 的<b>入参顺序</b>
+     * 逐条构造并逐条 {@code insert}，{@code id} 由 {@code @TableId(ASSIGN_ID)} 在 insert 时生成，
+     * 同一节点同一毫秒内序列号递增，因此单任务内 {@code id ASC} 与抽取顺序一致。
+     * 但 <b>刻意不按 {@code unitRef} 排</b>：字典序会把
+     * {@code section:10} 排在 {@code section:2} 前面，前端表格的行序在不同任务间跳来跳去，
+     * 而且它和"按原文顺序切分"的语义无关。跨节点部署或时钟回拨时雪花也不保证全局有序，
+     * 所以这里只承诺"插入顺序"，<b>不承诺与 {@code unitRef} 任何排序一致</b>。</p>
      *
      * <p><b>一次性取全量，不分页</b>：一个任务的 item 数上限就是切分单元数或测试点数
      * （60 量级），分页只会让"任务详情页"要么翻页要么写两套渲染逻辑。</p>
@@ -416,11 +424,14 @@ public class GenTaskService {
     private void applyTaskSort(LambdaQueryWrapper<GenTask> wrapper, PageQuery query) {
         String column = query.sortColumnOrDefault("created_at");
         boolean desc = query.isDesc();
+        // 注意：MP 的 orderBy(condition, isAsc, column) 第二参是 **isAsc** 不是 isDesc。
+        // 直接把 PageQuery.isDesc() 传进去会把默认排序翻成 ASC（最新任务排到最后）。
+        boolean isAsc = !desc;
         switch (column) {
-            case "updated_at" -> wrapper.orderBy(true, desc, GenTask::getUpdatedAt);
-            case "status" -> wrapper.orderBy(true, desc, GenTask::getStatus);
-            case "scene" -> wrapper.orderBy(true, desc, GenTask::getScene);
-            default -> wrapper.orderBy(true, desc, GenTask::getCreatedAt);
+            case "updated_at" -> wrapper.orderBy(true, isAsc, GenTask::getUpdatedAt);
+            case "status" -> wrapper.orderBy(true, isAsc, GenTask::getStatus);
+            case "scene" -> wrapper.orderBy(true, isAsc, GenTask::getScene);
+            default -> wrapper.orderBy(true, isAsc, GenTask::getCreatedAt);
         }
         wrapper.orderByDesc(GenTask::getId);
     }

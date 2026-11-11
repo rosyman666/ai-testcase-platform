@@ -149,6 +149,33 @@ class CaseServiceTest {
     }
 
     /**
+     * 列表：默认 created_at DESC + id DESC 兜底。
+     *
+     * <p>这条锁住一个很容易复发的坑：MP 的 {@code orderBy(condition, isAsc, column)}
+     * 第二参是 <b>isAsc</b>，把 {@code PageQuery.isDesc()} 原样传进去会把默认排序翻成
+     * ASC（最新用例排到最后），且不报错、只在肉眼比对列表时才看得出来。</p>
+     */
+    @Test
+    @DisplayName("列表：默认 created_at DESC，且末尾补 id DESC 形成全序")
+    void pageSortsByCreatedAtDescWithIdTieBreak() {
+        Page<TestCase> page = new Page<>(1, 20);
+        page.setRecords(List.of());
+        page.setTotal(0L);
+        when(testCaseMapper.selectPage(any(), any())).thenReturn(page);
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        org.mockito.ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TestCase>>
+                wrapper = (org.mockito.ArgumentCaptor) org.mockito.ArgumentCaptor.forClass(
+                com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper.class);
+
+        service.page(TASK_ID, null, null, new PageQuery());
+
+        verify(testCaseMapper).selectPage(any(), wrapper.capture());
+        String sql = wrapper.getValue().getSqlSegment();
+        assertThat(sql).containsIgnoringCase("created_at DESC").containsIgnoringCase("id DESC");
+        assertThat(sql).doesNotContain("created_at ASC");
+    }
+
+    /**
      * 列表：状态是脏值 → {@code 40001}，且不查库。
      */
     @Test

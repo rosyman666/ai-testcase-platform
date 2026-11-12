@@ -2,13 +2,13 @@
 
 > 记录原则：**每完成一个可验收的步骤就追加一条**，不写"今天写了很多代码"这种流水账。每条必须能回答四个问题：做了什么、为什么这么做（决策与取舍）、踩了什么坑、下一步是什么。
 >
-> 这份日志有两个用途：① 三个月后的你能快速回忆起设计意图；② 面试被问"这个项目怎么来的"时，你有真实的演进过程可讲。
+> 这份日志有两个用途：① 三个月后的你能快速回忆起设计意图；② 复盘"这个项目怎么来的"时，你有真实的演进过程可讲。
 
 ---
 
 ## 项目全生命周期路线图
 
-一个能上简历的项目，通常要走完这 6 个阶段。当前处于阶段 2 结束、阶段 3 开始。
+一个完整交付的项目，通常要走完这 6 个阶段。当前处于阶段 2 结束、阶段 3 开始。
 
 | 阶段 | 名称 | 产出 | 状态 |
 |---|---|---|---|
@@ -72,7 +72,7 @@
 | 单仓库同时放 `backend/` + `frontend/` + `docs/` | 一次提交可同时包含接口变更与前端调用变更，联调不产生版本错位 | 前后端两个仓库（跨仓库同步成本高） |
 | 密钥只走环境变量，代码零硬编码 | 一旦提交到公开仓库，Key 会被爬虫在数小时内扫走盗刷 | 写在 `application.yml`（方便但必然泄露） |
 | 强制 `eol=lf` | 避免"只改一行、diff 显示整个文件都变了"的经典事故 | 依赖各人本地 `core.autocrlf` 设置 |
-| 只提交与项目相关的文件 | 仓库是简历门面，`.idea/`、构建产物、个人配置只会制造噪音 | 直接 `git add .` 全量提交 |
+| 只提交与项目相关的文件 | 仓库是项目门面，`.idea/`、构建产物、个人配置只会制造噪音 | 直接 `git add .` 全量提交 |
 
 ### 踩坑记录
 
@@ -99,7 +99,7 @@
 
 | 决策 | 理由 | 被否决的方案 |
 |---|---|---|
-| GitHub 为主仓、Gitee 为镜像 | 简历与开源生态以 GitHub 为默认入口；Gitee 保证国内访问速度与备份冗余 | 只用一个平台（国内访问 GitHub 不稳定，单一平台有丢失风险） |
+| GitHub 为主仓、Gitee 为镜像 | 开源生态以 GitHub 为默认入口；Gitee 保证国内访问速度与备份冗余 | 只用一个平台（国内访问 GitHub 不稳定，单一平台有丢失风险） |
 | 远端仓库创建时保持为空 | 远端若有 README/LICENSE，首推会 `non-fast-forward` 被拒，需要 `--allow-unrelated-histories` 合并，历史会变脏 | 用平台模板初始化（省事但污染历史） |
 | 把代理写进仓库本地 `.git/config` | 只影响本仓库，不污染其他项目的网络配置 | 写全局配置（换网络环境时会牵连所有仓库） |
 
@@ -347,7 +347,7 @@
 5. `sourceRef` **服务端权威生成**，模型写的不落库；`category` 白名单由 `CaseType` 枚举现算。
 6. 前端 `pages/testpoints/TestPointReviewPage.tsx` + `types/testpoint.ts` + `api/testpoint.ts` + `/testpoints/:docId` 路由 + `DocDetail` 加"测试点评审"按钮。
 7. 单测 **28 条**（`TestPointHasherTest` 9 + `ExtractPlannerTest` 6 + `TestPointServiceTest` 10 + `TestPointExtractServiceTest` 3）；全量 **67 条** 0 失败。
-8. 端到端 **36 条全绿**（`D:/Temp/t05e2e.py`，mock，8097）。
+8. 端到端 **36 条全绿**（`t05e2e.py`，mock，8097）。
 
 ### 关键决策与理由
 
@@ -389,7 +389,7 @@
 6. **闭合 T05 的临时契约**：`POST /api/testpoints/extract` 从"同步返回 `TestPointExtractReport`"改为立即返回 `{taskId, taskNo}`，进度经 `GET /api/tasks/{id}/stream` 订阅（§6 验收⑦、§11.1 D-26 的临时契约）。
 7. **SSE 鉴权换位置不减量**：`/api/tasks/*/stream` 进 `WebMvcConfig.AUTH_WHITELIST`，改由 `GenTaskController` 自己调 `TokenService.verify(token)` 并校验任务存在。
 8. 改动 4 个既有文件：`WebMvcConfig`（白名单）、`TestPointController`（端点契约）、`TestPointExtractService`（`unitRefsOf`）、`TestPointService`（`keptHashesOfUnitRef`）。
-9. **冒烟已跑通**（`D:/Temp/t06smoke.py`，mock，8097）：抽取端点返 `taskId` / 任务终态 `SUCCESS` / 2 个 item 全部成功 / 测试点落库 / `sourceRef` 为 `operation:` 形态 / 重复抽取不翻倍 / 取消终态任务返 `40901`。**全量单测与端到端回归正在由其他 worker 补，结果待补**。
+9. **冒烟已跑通**（`t06smoke.py`，mock，8097）：抽取端点返 `taskId` / 任务终态 `SUCCESS` / 2 个 item 全部成功 / 测试点落库 / `sourceRef` 为 `operation:` 形态 / 重复抽取不翻倍 / 取消终态任务返 `40901`。**全量单测与端到端回归正在由其他 worker 补，结果待补**。
 
 ### 关键决策与理由
 
@@ -494,7 +494,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 2. **`generation/service/CaseGenerateHandler.java`（623 行）**：实现 `TaskItemHandler` 的 `CASE_GENERATE` 场景——读测试点 → 渲染 `case_generate` 模板 → 调模型 → schema 校验 → 幂等落库 → 回写 item。`TaskItemHandler` 是 T06 留的接缝，这次第一次被真正实现（`CASE_GENERATE` 与 `TESTPOINT_EXTRACT` 共用同一套调度/重试/SSE）。
 3. **`common/ErrorCode` 新增 `E_LLM_EMPTY(50006)`**：区分"结构合法但模型一条都没产出"与"结构不合规"。
 4. **`generation/service/CaseGenerateHandlerTest`（383 行 / 6 例）**：正常落库 / 测试点不存在 / `unit_ref` 缺失 / 空产出 `E_LLM_EMPTY` / `attemptNo = attempts+1` / 重跑裁尾。
-5. **新增两个验收脚本**：`D:/Temp/t07smoke.py`（24 条）、`D:/Temp/t07upsert.py`（7 条，专治真 MySQL 撞键分支）。
+5. **新增两个验收脚本**：`t07smoke.py`（24 条）、`t07upsert.py`（7 条，专治真 MySQL 撞键分支）。
 
 ### 关键决策与理由
 

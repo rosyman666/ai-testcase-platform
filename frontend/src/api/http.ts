@@ -68,6 +68,14 @@ instance.interceptors.request.use((config) => {
 // ---------- 响应拦截：解包 data / 统一错误 ----------
 instance.interceptors.response.use(
   (response: AxiosResponse) => {
+    // D-3（T09 裁决 ⑤）：responseType='blob' 的请求返回**完整 AxiosResponse**，
+    // 保留 headers 供 utils/download.ts 判别 Content-Type / 解析 Content-Disposition。
+    // 只返回 response.data(Blob) 会丢掉文件名；且后端导出端点失败时返回的是
+    // application/json 的 ApiResponse，必须拿到完整响应才能按形态分流。
+    // 普通 JSON 请求不走这个分支，行为与改动前逐字节一致（现有 5 个 api/*.ts 零回归）。
+    if (response.config?.responseType === 'blob') {
+      return response as unknown as AxiosResponse;
+    }
     const payload = response.data as ApiEnvelope<unknown>;
     // 非统一响应体（如文件下载流）原样返回，交给调用方处理
     if (!payload || typeof payload.code !== 'number') {
@@ -114,12 +122,22 @@ instance.interceptors.response.use(
 /**
  * GET 请求。
  *
+ * <p><b>T09 扩展（D-2）</b>：新增第三个可选参数 {@code config}，让导出端点能传
+ * {@code responseType: 'blob'}。这是向后兼容的纯增量——现有 5 个 {@code api/*.ts}
+ * 只用前两参，行为完全不变，无需改一行调用代码，也避免为导出把 GET 改成 POST
+ * （那会让 §4.2 的 #35/#36 契约漂移）。</p>
+ *
  * @param url 相对路径（如 `/docs`）
  * @param params 查询参数
- * @returns 解包后的业务数据
+ * @param config 额外 axios 配置（如 `{ responseType: 'blob' }`）；显式 params 优先于 config.params
+ * @returns 解包后的业务数据；blob 请求返回完整 {@link AxiosResponse}（见拦截器 D-3 分支）
  */
-export function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
-  return instance.get(url, { params }) as unknown as Promise<T>;
+export function get<T>(url: string, params?: Record<string, unknown>, config?: AxiosRequestConfig): Promise<T> {
+  const merged: AxiosRequestConfig = { ...(config ?? {}) };
+  if (params !== undefined) {
+    merged.params = params;
+  }
+  return instance.get(url, merged) as unknown as Promise<T>;
 }
 
 /**

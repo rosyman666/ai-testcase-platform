@@ -90,6 +90,8 @@ export const API_CODE = {
   TOKEN_INVALID: 40102,
   FORBIDDEN: 40301,
   NOT_FOUND: 40401,
+  /** T09 裁决 ⑤：导出空集 / 超上限的业务码，供 blob 判别分支识别「不下载」。 */
+  EMPTY_RESULT: 40003,
   INTERNAL: 50000,
 } as const;
 

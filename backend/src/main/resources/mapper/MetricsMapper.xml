@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  T11 指标聚合 SQL（docs/07 §6）。全部只读实时聚合，零 INSERT。
+
+  ## 三条写 SQL 前必须知道的约束
+  1. 所有过滤只绑定 #{q.fromUtc} / #{q.toUtcExclusive} 两个 UTC 时间参数，
+     一律 >= ... AND < ...（左闭右开），不在 SQL 里求当前时间。
+  2. SELECT 里的每个非聚合列都显式进 GROUP BY，或用 ANY_VALUE() 表明「随便取一个」，
+     在 ONLY_FULL_GROUP_BY 会话逐条可跑；day 分组用完整表达式 DATE(col + INTERVAL 8 HOUR)，
+     不用别名（不同 MySQL 版本对别名支持不一致）。
+  3. 五张指标源表都没有软删列，聚合语句不带任何软删条件；docId 语义是「按文档筛选」。
+     台账表没有 doc_id 列，按文档归集必须 JOIN gen_task —— 见下面 #46/#47 的写法。
+
+  ## 动态 SQL 边界
+  <if> 只用于可选的 docId / taskId 过滤；groupBy 三视角是三条独立 <select>，
+  由 CostService 白名单分派，不用动态字符串拼接列名（避免注入）。全部 resultType 映射，零 resultMap。
+-->
+<mapper namespace="com.aittest.metrics.mapper.MetricsMapper">
+
+    <!-- #43：只返回计数，不做除法（分母 0 由 MetricsService 处理，返回数值 0 而非 NULL） -->
+    <select id="selectCaseCounts" resultType="java.util.HashMap">
+        SELECT COUNT(*)                                                                     AS generatedCount,
+               COALESCE(SUM(CASE WHEN tc.status IN ('ACCEPTED','EDITED','REJECTED')
+                                THEN 1 ELSE 0 END), 0)                                      AS reviewedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'DRAFT'    THEN 1 ELSE 0 END), 0)        AS draftCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'ACCEPTED' THEN 1 ELSE 0 END), 0)        AS acceptedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'EDITED'   THEN 1 ELSE 0 END), 0)        AS editedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'REJECTED' THEN 1 ELSE 0 END), 0)        AS rejectedCount
+          FROM test_case tc
+         WHERE tc.created_at &gt;= #{q.fromUtc}
+           AND tc.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND tc.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND tc.task_id = #{q.taskId}
+        </if>
+    </select>
+
+    <!-- #44：按 Asia/Shanghai 民用日分组（固定 +8，无 DST）；SELECT 与 GROUP BY 表达式完全对齐 -->
+    <select id="selectAcceptanceByDay" resultType="java.util.HashMap">
+        SELECT DATE(tc.created_at + INTERVAL 8 HOUR)                                         AS dayKey,
+               COUNT(*)                                                                     AS generatedCount,
+               COALESCE(SUM(CASE WHEN tc.status IN ('ACCEPTED','EDITED','REJECTED')
+                                THEN 1 ELSE 0 END), 0)                                      AS reviewedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'ACCEPTED' THEN 1 ELSE 0 END), 0)        AS acceptedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'EDITED'   THEN 1 ELSE 0 END), 0)        AS editedCount,
+               COALESCE(SUM(CASE WHEN tc.status = 'REJECTED' THEN 1 ELSE 0 END), 0)        AS rejectedCount
+          FROM test_case tc
+         WHERE tc.created_at &gt;= #{q.fromUtc}
+           AND tc.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND tc.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND tc.task_id = #{q.taskId}
+        </if>
+         GROUP BY DATE(tc.created_at + INTERVAL 8 HOUR)
+         ORDER BY dayKey
+    </select>
+
+    <!-- #45：未知码 / NULL / 已停用字典项统一归 OTHER；label 用 ANY_VALUE 显式表态；
+         自由文本补充列不出现在 SELECT / WHERE / GROUP BY 任何位置 -->
+    <select id="selectRejectReasons" resultType="java.util.HashMap">
+        SELECT COALESCE(r.code, 'OTHER')                AS code,
+               ANY_VALUE(COALESCE(r.label, '其他原因')) AS label,
+               COUNT(*)                                AS cnt
+          FROM case_review cr
+          LEFT JOIN reject_reason r
+                 ON r.code = cr.reject_reason_code
+                AND r.enabled = 1
+          JOIN test_case tc ON tc.id = cr.case_id
+         WHERE cr.action = 'REJECT'
+           AND cr.created_at &gt;= #{q.fromUtc}
+           AND cr.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND tc.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND tc.task_id = #{q.taskId}
+        </if>
+         GROUP BY COALESCE(r.code, 'OTHER')
+         ORDER BY cnt DESC
+    </select>
+
+    <!-- #46 groupBy=task。三视角与 sumCostDirect / selectCallTotals 共用完全相同的
+         FROM + WHERE，保证「各视角求和 == 直接 SUM(cost_micro)」差值严格为 0。
+         LEFT JOIN gen_task 只为取 task_no；台账表没有 doc_id 列，docId 过滤走 gen_task.doc_id。 -->
+    <select id="selectCostByTask" resultType="java.util.HashMap">
+        SELECT l.task_id                               AS pointKey,
+               ANY_VALUE(gt.task_no)                  AS taskNo,
+               COALESCE(SUM(l.prompt_tokens), 0)     AS promptTokens,
+               COALESCE(SUM(l.completion_tokens), 0) AS completionTokens,
+               COALESCE(SUM(l.cost_micro), 0)        AS costMicro,
+               COUNT(*)                               AS callCount
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+         GROUP BY l.task_id
+         ORDER BY pointKey
+    </select>
+
+    <!-- #46 groupBy=day -->
+    <select id="selectCostByDay" resultType="java.util.HashMap">
+        SELECT DATE(l.created_at + INTERVAL 8 HOUR)    AS pointKey,
+               COALESCE(SUM(l.prompt_tokens), 0)       AS promptTokens,
+               COALESCE(SUM(l.completion_tokens), 0)   AS completionTokens,
+               COALESCE(SUM(l.cost_micro), 0)          AS costMicro,
+               COUNT(*)                                 AS callCount
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+         GROUP BY DATE(l.created_at + INTERVAL 8 HOUR)
+         ORDER BY pointKey
+    </select>
+
+    <!-- #46 groupBy=model -->
+    <select id="selectCostByModel" resultType="java.util.HashMap">
+        SELECT l.model                                 AS pointKey,
+               COALESCE(SUM(l.prompt_tokens), 0)       AS promptTokens,
+               COALESCE(SUM(l.completion_tokens), 0)   AS completionTokens,
+               COALESCE(SUM(l.cost_micro), 0)          AS costMicro,
+               COUNT(*)                                 AS callCount
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+         GROUP BY l.model
+         ORDER BY pointKey
+    </select>
+
+    <!-- #46 校验基准：直接对同一窗口求和 -->
+    <select id="sumCostDirect" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(l.cost_micro), 0) AS totalCostMicro
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+    </select>
+
+    <!-- #43/#46/#47 共用：台账总量 + 解析失败计数（分子按 §8.3 字面 LIKE 'E_LLM_PARSE%'） -->
+    <select id="selectCallTotals" resultType="java.util.HashMap">
+        SELECT COALESCE(SUM(l.prompt_tokens), 0)                                   AS promptTokens,
+               COALESCE(SUM(l.completion_tokens), 0)                              AS completionTokens,
+               COALESCE(SUM(l.cost_micro), 0)                                     AS costMicro,
+               COUNT(*)                                                            AS callCount,
+               COALESCE(SUM(CASE WHEN l.error_code LIKE 'E_LLM_PARSE%'
+                                THEN 1 ELSE 0 END), 0)                            AS parseFailCount
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+    </select>
+
+    <!-- #47：首次通过率 / 生成成功率。数据源只有 gen_task_item；按 degraded 拆分本批不纳入 -->
+    <select id="selectQuality" resultType="java.util.HashMap">
+        SELECT COUNT(*)                                                                        AS totalItems,
+               COALESCE(SUM(CASE WHEN gti.attempts = 1 AND gti.status = 'SUCCESS'
+                                THEN 1 ELSE 0 END), 0)                                         AS firstPassCount,
+               COALESCE(SUM(CASE WHEN gti.status = 'SUCCESS' THEN 1 ELSE 0 END), 0)         AS successCount
+          FROM gen_task_item gti
+          JOIN gen_task gt ON gt.id = gti.task_id
+         WHERE gti.created_at &gt;= #{q.fromUtc}
+           AND gti.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND gti.task_id = #{q.taskId}
+        </if>
+    </select>
+
+    <!-- p50/p95 样本：Java 侧 nearest-rank 排序，不用 avg、不用 GROUP_CONCAT（会截断长尾） -->
+    <select id="selectLatencies" resultType="java.lang.Integer">
+        SELECT gti.latency_ms
+          FROM gen_task_item gti
+          JOIN gen_task gt ON gt.id = gti.task_id
+         WHERE gti.created_at &gt;= #{q.fromUtc}
+           AND gti.created_at &lt;  #{q.toUtcExclusive}
+           AND gti.status IN ('SUCCESS','FAILED')
+           AND gti.latency_ms &gt; 0
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND gti.task_id = #{q.taskId}
+        </if>
+         ORDER BY gti.latency_ms
+    </select>
+
+    <!-- 成本 0 三成因归因：按 model + status 分组（非聚合列全部进 GROUP BY） -->
+    <select id="selectCostModelStatus" resultType="java.util.HashMap">
+        SELECT l.model                                                   AS model,
+               l.status                                                  AS status,
+               COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0)  AS tokens,
+               COUNT(*)                                                  AS callCount
+          FROM llm_call_log l
+          LEFT JOIN gen_task gt ON gt.id = l.task_id
+         WHERE l.created_at &gt;= #{q.fromUtc}
+           AND l.created_at &lt;  #{q.toUtcExclusive}
+        <if test="q.docId != null">
+           AND gt.doc_id = #{q.docId}
+        </if>
+        <if test="q.taskId != null">
+           AND l.task_id = #{q.taskId}
+        </if>
+         GROUP BY l.model, l.status
+    </select>
+
+</mapper>

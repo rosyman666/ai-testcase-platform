@@ -40,7 +40,7 @@ interface PageBoundaryProps {
    * 兜底占位是否按"整屏"计算高度。
    *
    * 只有落在 AppShell **外面**的页面（`/login`）才传 true；
-   * 壳内的页面继承 40vh，理由见下方 JSDoc。
+   * 壳内的页面走 `height: 100%`，理由见下方 JSDoc。
    */
   fullScreen?: boolean;
 }
@@ -70,7 +70,7 @@ interface PageBoundaryProps {
  * @param props 属性
  * @returns Suspense 边界
  */
-export function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.Element {
+function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.Element {
   return (
     <Suspense
       fallback={

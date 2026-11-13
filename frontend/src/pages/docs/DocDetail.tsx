@@ -19,14 +19,10 @@ import Typography from '@mui/material/Typography';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import { getDoc, reparseDoc } from '@/api/doc';
+// 解析状态的中文与配色统一走常量层：本页曾经自带一份同名表，与列表页"手工同步"，
+// 后端加一档时两份表会静默漂移（编译期、运行期、测试期都不会响）
+import { getParseStatusMeta } from '@/constants/docStatus';
 import { toast } from '@/utils/toast';
-
-/** 状态中文与配色（与列表页保持同一套映射）。 */
-const PARSE_STATUS_META: Record<string, { label: string; color: 'default' | 'success' | 'error' | 'warning' }> = {
-  PENDING: { label: '待解析', color: 'warning' },
-  PARSED: { label: '已解析', color: 'success' },
-  FAILED: { label: '解析失败', color: 'error' },
-};
 
 /** HTTP 方法配色。 */
 const METHOD_COLOR: Record<string, 'primary' | 'success' | 'warning' | 'error' | 'default'> = {
@@ -100,10 +96,7 @@ export default function DocDetail(): JSX.Element {
     );
   }
 
-  const statusMeta = PARSE_STATUS_META[data.parseStatus] ?? {
-    label: data.parseStatus,
-    color: 'default' as const,
-  };
+  const statusMeta = getParseStatusMeta(data.parseStatus);
 
   // 内嵌列表有上限：用后端给的 COUNT(*) 判断是否被截断，而不是拿数组长度猜
   const sectionTruncated = data.totalSectionCount > data.sections.length;

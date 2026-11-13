@@ -20,7 +20,11 @@ export const FONT_FAMILY_SANS = [
 
 /**
  * 状态色板：任务状态、用例状态、执行结果三类状态共用一个映射，
- * 避免各页面自己写颜色导致同状态不同色（StatusChip 组件在 T12 消费它）。
+ * 避免各页面自己写颜色导致同状态不同色。
+ *
+ * 分工：`constants/status.ts` 是文案与状态映射的唯一真源，本文只提供色值；
+ * `StatusChip` 经 `constants/status.ts` 间接消费这里的 `STATUS_COLORS`，
+ * 不要在页面里直接引用本文的常量。
  */
 export const STATUS_COLORS = {
   PENDING: 'default',

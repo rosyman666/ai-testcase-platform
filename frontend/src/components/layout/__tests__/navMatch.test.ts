@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { matchNavItem, NAV_ITEMS } from '@/constants/nav';
+import {
+  FALLBACK_MODULE_TITLE,
+  matchNavItem,
+  NAV_ITEMS,
+  resolveModuleTitle,
+} from '@/constants/nav';
 
 describe('constants/nav — matchNavItem 路径匹配', () => {
   it('根路径命中概览', () => {
@@ -52,5 +57,31 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
   it('导航表的 key 与 path 唯一，避免选中态出现歧义', () => {
     expect(new Set(NAV_ITEMS.map((item) => item.key)).size).toBe(NAV_ITEMS.length);
     expect(new Set(NAV_ITEMS.map((item) => item.path)).size).toBe(NAV_ITEMS.length);
+  });
+});
+
+describe('constants/nav — resolveModuleTitle 顶栏标题解析', () => {
+  it('有导航入口的路径取导航文案', () => {
+    expect(resolveModuleTitle('/')).toBe('概览');
+    expect(resolveModuleTitle('/docs/123')).toBe('需求文档');
+    expect(resolveModuleTitle('/tasks/abc')).toBe('生成任务');
+  });
+
+  it('有页面但侧栏没有入口的 /testpoints/:docId 不能被显示成「控制台」', () => {
+    // T12-1b W2 回归点：测试点评审从文档详情页跳进去，侧栏没有它的导航项，
+    // 只靠 matchNavItem 会回退成「控制台」，属于误导性文案
+    expect(resolveModuleTitle('/testpoints/9')).toBe('测试点评审');
+    expect(resolveModuleTitle('/testpoints/1234567890')).toBe('测试点评审');
+  });
+
+  it('额外标题表按动态段正则匹配，/testpoints 本身（无 docId）仍回退默认标题', () => {
+    expect(resolveModuleTitle('/testpoints')).toBe(FALLBACK_MODULE_TITLE);
+    expect(resolveModuleTitle('/testpoints/9/extra')).toBe(FALLBACK_MODULE_TITLE);
+  });
+
+  it('未知路径回退「控制台」，且返回值永不为空串', () => {
+    expect(resolveModuleTitle('/unknown')).toBe(FALLBACK_MODULE_TITLE);
+    expect(resolveModuleTitle('')).toBe(FALLBACK_MODULE_TITLE);
+    expect(resolveModuleTitle('/unknown')).not.toBe('');
   });
 });

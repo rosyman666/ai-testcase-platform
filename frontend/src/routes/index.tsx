@@ -32,6 +32,19 @@ const CaseBoardPage = lazy(() => import('@/pages/cases/CaseBoard'));
 // T09/T11：指标与成本看板（只追加，不动已有 7 条与兜底）
 const OverviewDashboardPage = lazy(() => import('@/pages/metrics/OverviewDashboard'));
 
+/** PageBoundary 属性。 */
+interface PageBoundaryProps {
+  /** 待渲染的页面元素。 */
+  children: ReactElement;
+  /**
+   * 兜底占位是否按"整屏"计算高度。
+   *
+   * 只有落在 AppShell **外面**的页面（`/login`）才传 true；
+   * 壳内的页面继承 40vh，理由见下方 JSDoc。
+   */
+  fullScreen?: boolean;
+}
+
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
  *
@@ -39,13 +52,31 @@ const OverviewDashboardPage = lazy(() => import('@/pages/metrics/OverviewDashboa
  * 一旦被 Suspense 包住，任何页面 chunk 未就绪时整壳都会被替换成转圈，
  * 侧栏与顶栏跟着闪一下。
  *
- * @param props.children 页面元素
+ * 兜底高度必须**分两种场景**，不要统一成一个值：
+ * - 壳外（`/login`，传 `fullScreen`）：用 `100vh`，登录页没有别的容器撑高度，
+ *   不留满屏会让转圈贴在视口顶端；
+ * - 壳内（其余 9 条）：用 `40vh`。AppShell 的 `main` 高度已经是 `h-screen - TopBar`
+ *   （800px 视口下是 751px），兜底再按 `100vh` 算就会比容器高 49px，
+ *   每次首次进入未加载过的页面都会闪一条多余的竖向滚动条。
+ *
+ * 用 MUI `sx.minHeight` 而不是 Tailwind 任意值（`min-h-[40vh]`）：任意值依赖
+ * JIT 扫描到字面量、且和 MUI 的 emotion 样式层叠顺序存在不确定性，`sx` 最稳。
+ *
+ * @param props 属性
+ * @returns Suspense 边界
  */
-function PageBoundary({ children }: { children: ReactElement }): JSX.Element {
+function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.Element {
   return (
     <Suspense
       fallback={
-        <Box className="flex min-h-screen items-center justify-center">
+        <Box
+          sx={{
+            display: 'flex',
+            minHeight: fullScreen ? '100vh' : '40vh',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
           <CircularProgress size={28} />
         </Box>
       }
@@ -74,7 +105,8 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: (
-      <PageBoundary>
+      // 唯一的 fullScreen：登录页在 AppShell 外面，兜底要占满整屏
+      <PageBoundary fullScreen>
         <LoginPage />
       </PageBoundary>
     ),

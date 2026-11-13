@@ -93,3 +93,44 @@ export function matchNavItem(pathname: string): NavItem | undefined {
 
   return matched;
 }
+
+/** 顶栏在完全匹配不到时的默认标题。 */
+export const FALLBACK_MODULE_TITLE = '控制台';
+
+/**
+ * 不在侧栏导航里、但顶栏需要正确标题的页面（正则 → 标题，按顺序取第一条命中）。
+ *
+ * 为什么用正则而不是硬编码字符串：这些路径带动态段（`:docId`），
+ * 写死 `/testpoints/123` 只能在特定 id 下生效。
+ *
+ * 注意：`/docs/:id` **不要**往这里加——它会被 `matchNavItem` 前缀命中「需求文档」，
+ * 这本来就是期望值；具体文档名由详情页自己的 `PageHeader` 展示。
+ */
+const EXTRA_TITLES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^\/testpoints\/[^/]+\/?$/, '测试点评审'],
+];
+
+/**
+ * 解析顶栏显示的业务模块标题。
+ *
+ * 顺序：导航项 label → 额外标题表 → 「控制台」。
+ * 收在这里而不是写在 TopBar 里，是为了能纯函数单测（`/testpoints/:docId`
+ * 这类"有页面、但侧栏没有入口"的情况最容易被漏掉）。
+ *
+ * @param pathname 当前路径（`useLocation().pathname`）
+ * @returns 模块标题，永不为空串
+ */
+export function resolveModuleTitle(pathname: string): string {
+  const navItem = matchNavItem(pathname);
+  if (navItem) {
+    return navItem.label;
+  }
+
+  for (const [pattern, title] of EXTRA_TITLES) {
+    if (pattern.test(pathname)) {
+      return title;
+    }
+  }
+
+  return FALLBACK_MODULE_TITLE;
+}

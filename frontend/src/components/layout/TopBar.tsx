@@ -18,7 +18,7 @@ import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
-import { matchNavItem } from '@/constants/nav';
+import { resolveModuleTitle } from '@/constants/nav';
 import { useAuthStore } from '@/store/authStore';
 
 /** TopBar 属性。 */
@@ -65,9 +65,10 @@ export default function TopBar({ onOpenNav }: TopBarProps): JSX.Element {
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const menuOpen = menuAnchor !== null;
 
-  // 命中导航项就用它的 label；命中不了（例如以后新增页面还没登记导航）退回「控制台」，
-  // 不留空白标题
-  const moduleTitle = matchNavItem(pathname)?.label ?? '控制台';
+  // 标题解析收敛在 constants/nav.ts 的 resolveModuleTitle 里：
+  // 先查导航项，再查"有页面但侧栏没入口"的额外标题表（如 /testpoints/:docId），
+  // 最后才回退「控制台」
+  const moduleTitle = resolveModuleTitle(pathname);
 
   const handleOpenMenu = (event: MouseEvent<HTMLElement>): void => {
     setMenuAnchor(event.currentTarget);

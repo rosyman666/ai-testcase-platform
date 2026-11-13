@@ -53,28 +53,38 @@ interface PageBoundaryProps {
  * 侧栏与顶栏跟着闪一下。
  *
  * 兜底高度必须**分两种场景**，不要统一成一个值：
- * - 壳外（`/login`，传 `fullScreen`）：用 `100vh`，登录页没有别的容器撑高度，
- *   不留满屏会让转圈贴在视口顶端；
- * - 壳内（其余 9 条）：用 `40vh`。AppShell 的 `main` 高度已经是 `h-screen - TopBar`
- *   （800px 视口下是 751px），兜底再按 `100vh` 算就会比容器高 49px，
- *   每次首次进入未加载过的页面都会闪一条多余的竖向滚动条。
+ * - 壳外（`/login`，传 `fullScreen`）：用 `minHeight: 100vh`。登录页的父级是 body，
+ *   没有别的容器撑高度，只有视口单位能拿到参照，不留满屏会让转圈贴在顶端；
+ * - 壳内（其余 9 条）：用 `height: 100%`。`main` 是 `h-screen` flex 列里的
+ *   `flex-1 + min-h-0`，高度已经确定，`100%` 能正确解析到它，转圈精确居中。
  *
- * 用 MUI `sx.minHeight` 而不是 Tailwind 任意值（`min-h-[40vh]`）：任意值依赖
- * JIT 扫描到字面量、且和 MUI 的 emotion 样式层叠顺序存在不确定性，`sx` 最稳。
+ * 这里踩过两次，记下来免得再踩：
+ * - 最初用 `100vh`：`main` 只有 751px（800 − TopBar 49px），兜底却按 800px 算，
+ *   每次首次进入未加载页面都会闪一条 49px 的多余竖向滚动条（实测 `overflowPx=49`）；
+ * - 改成 `40vh` 后溢出归零，但 320px 的盒子撑不满 751px 的容器，转圈偏上 215px
+ *   （1920×1080 下偏 299px）——**修掉溢出不能顺手把居中丢掉**。
+ *
+ * 用 MUI `sx` 而不是 Tailwind 任意值（`min-h-[40vh]`）：任意值依赖 JIT 扫描到字面量、
+ * 且和 MUI 的 emotion 样式层叠顺序存在不确定性，`sx` 最稳。
  *
  * @param props 属性
  * @returns Suspense 边界
  */
-function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.Element {
+export function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.Element {
   return (
     <Suspense
       fallback={
         <Box
           sx={{
             display: 'flex',
-            minHeight: fullScreen ? '100vh' : '40vh',
             alignItems: 'center',
             justifyContent: 'center',
+            // 壳外（/login）：按视口高度铺满，父级是 body，只有 100vh 能拿到参照。
+            // 壳内（其余 9 条）：用 100% 而不是 40vh——`main` 是 `h-screen` flex 列里的
+            // `flex-1 + min-h-0`，有确定高度，100% 能解析到它；40vh 只有容器的一半多
+            // （1280×800 下 320px vs 751px），转圈会明显偏上，虽然不再溢出但不居中。
+            minHeight: fullScreen ? '100vh' : undefined,
+            height: fullScreen ? undefined : '100%',
           }}
         >
           <CircularProgress size={28} />

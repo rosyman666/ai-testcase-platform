@@ -11,7 +11,7 @@ import { useAuthStore } from '@/store/authStore';
  * 纪律：page 组件**不得自建** `<Routes>` / `createBrowserRouter`，新增页面只在这里加一条。
  * 理由：守卫、懒加载边界、404 兜底如果散落在页面里，会变成"某个页面忘了包守卫"的漏洞。
  *
- * 当前层级：`/login`（公开）→ `RequireAuth`（守卫）→ `AppShell`（布局壳）→ 9 条业务路由。
+ * 当前层级：`/login`（公开）→ `RequireAuth`（守卫）→ `AppShell`（布局壳）→ 10 条业务路由。
  * 业务路由的 path 与 element 一旦确定就不要在本层顺手改，加模块只在 AppShell 的 children 里追加。
  */
 
@@ -57,7 +57,7 @@ interface PageBoundaryProps {
  * 兜底高度必须**分两种场景**，不要统一成一个值：
  * - 壳外（`/login`，传 `fullScreen`）：用 `minHeight: 100vh`。登录页的父级是 body，
  *   没有别的容器撑高度，只有视口单位能拿到参照，不留满屏会让转圈贴在顶端；
- * - 壳内（其余 9 条）：用 `height: 100%`。`main` 是 `h-screen` flex 列里的
+ * - 壳内（其余 10 条）：用 `height: 100%`。`main` 是 `h-screen` flex 列里的
  *   `flex-1 + min-h-0`，高度已经确定，`100%` 能正确解析到它，转圈精确居中。
  *
  * 这里踩过两次，记下来免得再踩：
@@ -82,7 +82,7 @@ function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.
             alignItems: 'center',
             justifyContent: 'center',
             // 壳外（/login）：按视口高度铺满，父级是 body，只有 100vh 能拿到参照。
-            // 壳内（其余 9 条）：用 100% 而不是 40vh——`main` 是 `h-screen` flex 列里的
+            // 壳内（其余 10 条）：用 100% 而不是 40vh——`main` 是 `h-screen` flex 列里的
             // `flex-1 + min-h-0`，有确定高度，100% 能解析到它；40vh 只有容器的一半多
             // （1280×800 下 320px vs 751px），转圈会明显偏上，虽然不再溢出但不居中。
             minHeight: fullScreen ? '100vh' : undefined,

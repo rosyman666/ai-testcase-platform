@@ -14,7 +14,13 @@ import { fetchHealth } from '@/api/system';
 import { useAuthStore } from '@/store/authStore';
 
 /**
- * 占位首页：T02 的"鉴权闭环 + 基础设施自检"页面，T12 会用真正的 AppShell + 概览页替换它。
+ * 系统概览页：展示当前登录账号与后端/数据库连通性。
+ *
+ * 导航已由 `AppShell` 的侧栏接管，本页不再提供业务入口按钮——
+ * 页面里重复一份入口，将来加模块就会漏改一处。
+ *
+ * 外层只留 `p-6`，**不要加 `min-h-screen`**：本页现在位于 AppShell 的
+ * `overflow-y-auto` 容器内，再撑一次视口高度会出现"外层滚动区 + 页面自身"双滚动条。
  *
  * 数据获取一律通过 `@/api/*`（见 §8.5），组件里不出现 axios、不拼 baseURL——
  * 否则会绕过 `http.ts` 的 401 处理与 traceId 归一化。
@@ -45,15 +51,15 @@ export default function Home(): JSX.Element {
   };
 
   return (
-    <Box className="min-h-screen w-full px-6 py-8" sx={{ backgroundColor: 'background.default' }}>
+    <Box className="p-6" sx={{ backgroundColor: 'background.default' }}>
       <Box className="mx-auto max-w-4xl">
         <Stack direction="row" alignItems="center" justifyContent="space-between" className="mb-6">
           <Box>
             <Typography variant="h1" component="h1">
-              登录成功
+              系统概览
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              T02 基础设施与鉴权闭环自检页（T12 会替换为真正的控制台）
+              平台运行状态与当前登录信息
             </Typography>
           </Box>
           <Button variant="outlined" startIcon={<LogoutRoundedIcon />} onClick={handleLogout}>
@@ -62,10 +68,10 @@ export default function Home(): JSX.Element {
         </Stack>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          {/* 登录态 */}
+          {/* 当前账号 */}
           <Paper elevation={0} className="p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
             <Typography variant="h5" component="h2" className="mb-3">
-              登录态（/api/auth/me）
+              当前账号
             </Typography>
             {meQuery.isLoading && <Typography variant="body2">加载中…</Typography>}
             {meQuery.isError && (
@@ -95,11 +101,11 @@ export default function Home(): JSX.Element {
             )}
           </Paper>
 
-          {/* 健康检查 */}
+          {/* 服务状态 */}
           <Paper elevation={0} className="p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
             <Stack direction="row" alignItems="center" justifyContent="space-between" className="mb-3">
               <Typography variant="h5" component="h2">
-                后端连通性（/api/health）
+                服务状态
               </Typography>
               <Button
                 size="small"
@@ -130,42 +136,6 @@ export default function Home(): JSX.Element {
             )}
           </Paper>
         </div>
-
-        <Paper elevation={0} className="mt-6 p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h5" component="h2" className="mb-2">
-            业务入口
-          </Typography>
-          <Typography variant="body2" color="text.secondary" className="mb-3">
-            控制台（T12）做好之前，先用这里的入口进各模块，免得每次手敲地址。
-          </Typography>
-          <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
-            <Button variant="outlined" size="small" onClick={() => navigate('/docs')}>
-              需求文档（T03）
-            </Button>
-            <Button variant="outlined" size="small" onClick={() => navigate('/prompts')}>
-              提示词模板（T04）
-            </Button>
-            <Button variant="outlined" size="small" onClick={() => navigate('/tasks')}>
-              生成任务（T07）
-            </Button>
-            <Button variant="outlined" size="small" onClick={() => navigate('/cases')}>
-              用例评审（T08）
-            </Button>
-            <Button variant="outlined" size="small" onClick={() => navigate('/metrics')}>
-              指标与成本看板（T11）
-            </Button>
-          </Stack>
-        </Paper>
-
-        <Paper elevation={0} className="mt-6 p-5" sx={{ border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h5" component="h2" className="mb-2">
-            下一步
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            T03 起会有文档接入、测试点评审、用例生成等业务页面；本页仅用于验证
-            「鉴权拦截 → 登录 → token 注入 → 401 自动跳登录」这条链路已闭环。
-          </Typography>
-        </Paper>
       </Box>
     </Box>
   );

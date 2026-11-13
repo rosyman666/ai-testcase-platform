@@ -145,6 +145,15 @@ export default function Home(): JSX.Element {
             <Button variant="outlined" size="small" onClick={() => navigate('/prompts')}>
               提示词模板（T04）
             </Button>
+            <Button variant="outlined" size="small" onClick={() => navigate('/tasks')}>
+              生成任务（T07）
+            </Button>
+            <Button variant="outlined" size="small" onClick={() => navigate('/cases')}>
+              用例评审（T08）
+            </Button>
+            <Button variant="outlined" size="small" onClick={() => navigate('/metrics')}>
+              指标与成本看板（T11）
+            </Button>
           </Stack>
         </Paper>
 

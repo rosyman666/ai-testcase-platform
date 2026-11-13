@@ -27,6 +27,8 @@ const TestPointReviewPage = lazy(() => import('@/pages/testpoints/TestPointRevie
 const TaskListPage = lazy(() => import('@/pages/tasks/TaskList'));
 const TaskDetailPage = lazy(() => import('@/pages/tasks/TaskDetail'));
 const CaseBoardPage = lazy(() => import('@/pages/cases/CaseBoard'));
+// T09/T11：指标与成本看板（只追加，不动已有 7 条与兜底）
+const OverviewDashboardPage = lazy(() => import('@/pages/metrics/OverviewDashboard'));
 
 /**
  * 懒加载兜底：居中转圈（避免白屏突兀）。
@@ -144,6 +146,15 @@ export const router = createBrowserRouter([
         element: (
           <PageBoundary>
             <CaseBoardPage />
+          </PageBoundary>
+        ),
+      },
+      {
+        // T09/T11 指标与成本看板：只追加这一条，/login、/、* 兜底一字不动
+        path: '/metrics',
+        element: (
+          <PageBoundary>
+            <OverviewDashboardPage />
           </PageBoundary>
         ),
       },

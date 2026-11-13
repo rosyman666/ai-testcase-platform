@@ -33,6 +33,7 @@ import PageHeader from '@/components/common/PageHeader';
 import StatusChip from '@/components/common/StatusChip';
 import EmptyState from '@/components/common/EmptyState';
 import CaseReviewDrawer from '@/pages/cases/CaseReviewDrawer';
+import CaseExportDialog from '@/pages/cases/CaseExportDialog';
 import RejectReasonPicker from '@/pages/cases/RejectReasonPicker';
 import { listCases, reviewCase, batchReviewCases } from '@/api/cases';
 import { usePageQuery } from '@/hooks/usePageQuery';
@@ -56,6 +57,7 @@ export default function CaseBoard(): JSX.Element {
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [showRejectPicker, setShowRejectPicker] = useState(false);
   const [rejectReasonCode, setRejectReasonCode] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
   const [batchResult, setBatchResult] = useState<{ updated: number; skipped: Array<{ id: string; reason: string }> } | null>(null);
   const { page, size, setPage, setSize, query, resetPage } = usePageQuery();
 
@@ -205,6 +207,9 @@ export default function CaseBoard(): JSX.Element {
               onClick={() => handleBatch('ACCEPT')}
             >
               批量采纳（{selectedIds.size}）
+            </Button>
+            <Button variant="outlined" onClick={() => setExportOpen(true)}>
+              用例导出
             </Button>
           </>
         }
@@ -373,6 +378,13 @@ export default function CaseBoard(): JSX.Element {
           // 不关抽屉，方便连续评审
           void updated;
         }}
+      />
+
+      {/* 用例导出弹窗（T09 #35/#36，与批量评审并列的独立入口） */}
+      <CaseExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        defaultTaskId={taskIdFilter}
       />
     </Box>
   );

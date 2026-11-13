@@ -8,6 +8,7 @@
  */
 
 import SvgIcon from '@mui/material/SvgIcon';
+import ChecklistRounded from '@mui/icons-material/ChecklistRounded';
 import DescriptionRounded from '@mui/icons-material/DescriptionRounded';
 import FactCheckRounded from '@mui/icons-material/FactCheckRounded';
 import InsightsRounded from '@mui/icons-material/InsightsRounded';
@@ -48,6 +49,9 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { key: 'overview', label: '概览', path: '/', icon: SpaceDashboardRounded, exact: true },
   { key: 'docs', label: '需求文档', path: '/docs', icon: DescriptionRounded },
+  // 测试点评审紧跟在需求文档后面：它是文档链路的下一跳（选文档 → 评审测试点），
+  // 侧栏顺序刻意与业务流程一致，而不是按开发批次排
+  { key: 'testpoints', label: '测试点评审', path: '/testpoints', icon: ChecklistRounded },
   { key: 'prompts', label: '提示词模板', path: '/prompts', icon: TuneRounded },
   { key: 'tasks', label: '生成任务', path: '/tasks', icon: PlayCircleOutlineRounded },
   { key: 'cases', label: '用例评审', path: '/cases', icon: FactCheckRounded },
@@ -100,15 +104,18 @@ export const FALLBACK_MODULE_TITLE = '控制台';
 /**
  * 不在侧栏导航里、但顶栏需要正确标题的页面（正则 → 标题，按顺序取第一条命中）。
  *
- * 为什么用正则而不是硬编码字符串：这些路径带动态段（`:docId`），
- * 写死 `/testpoints/123` 只能在特定 id 下生效。
+ * 目前**没有条目**：`/testpoints` 已经是导航项（T12-2a 补的落地页），
+ * `/testpoints/:docId` 由 `matchNavItem` 的前缀规则命中「测试点评审」，
+ * 所以原来的 `/^\/testpoints\/[^/]+$/` 已成死代码，删掉。
+ *
+ * 为什么保留这张空表而不是把循环一起删掉：以后再加"有页面、但侧栏故意不给入口"的
+ * 详情页（例如独立的全屏编辑页）时，只需往这里 push 一条，不必改
+ * `resolveModuleTitle` 的签名，也不用改 TopBar。
  *
  * 注意：`/docs/:id` **不要**往这里加——它会被 `matchNavItem` 前缀命中「需求文档」，
  * 这本来就是期望值；具体文档名由详情页自己的 `PageHeader` 展示。
  */
-const EXTRA_TITLES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/^\/testpoints\/[^/]+\/?$/, '测试点评审'],
-];
+const EXTRA_TITLES: ReadonlyArray<readonly [RegExp, string]> = [];
 
 /**
  * 解析顶栏显示的业务模块标题。

@@ -24,30 +24,19 @@ import Typography from '@mui/material/Typography';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import { deleteDoc, listDocs, reparseDoc } from '@/api/doc';
+import { DOC_TYPE_LABEL, getParseStatusMeta, PARSE_STATUS_META } from '@/constants/docStatus';
 import type { DocListQuery, DocSourceVO } from '@/types/doc';
 import { toast } from '@/utils/toast';
 import DocUploadDialog from '@/pages/docs/DocUploadDialog';
-
-/** 解析状态的中文与配色（后端编码是唯一真源，这里只做展示映射）。 */
-const PARSE_STATUS_META: Record<string, { label: string; color: 'default' | 'success' | 'error' | 'warning' }> = {
-  PENDING: { label: '待解析', color: 'warning' },
-  PARSED: { label: '已解析', color: 'success' },
-  FAILED: { label: '解析失败', color: 'error' },
-};
-
-/** 文档类型的中文名。 */
-const DOC_TYPE_LABEL: Record<string, string> = {
-  MD: 'Markdown',
-  TXT: '纯文本',
-  DOCX: 'Word',
-  OPENAPI_JSON: 'OpenAPI',
-};
 
 /**
  * 文档列表页（`/docs`）。
  *
  * 三态齐全：loading 转圈、error 带重试、empty 给引导文案（T12 会把这三态抽成通用组件，
  * 在此之前先按同一套语义写，避免到时候改写逻辑）。
+ *
+ * 解析状态与文档类型的中文映射**不在本文件定义**：测试点评审落地页也要用同一份，
+ * 已抽到 `@/constants/docStatus`。
  */
 export default function DocList(): JSX.Element {
   const navigate = useNavigate();
@@ -199,7 +188,7 @@ export default function DocList(): JSX.Element {
               </TableHead>
               <TableBody>
                 {rows.map((row) => {
-                  const meta = PARSE_STATUS_META[row.parseStatus] ?? { label: row.parseStatus, color: 'default' as const };
+                  const meta = getParseStatusMeta(row.parseStatus);
                   return (
                     <TableRow key={row.id} hover>
                       <TableCell>{row.docNo}</TableCell>

@@ -25,6 +25,8 @@ const DocDetailPage = lazy(() => import('@/pages/docs/DocDetail'));
 const PromptTemplateListPage = lazy(() => import('@/pages/prompts/PromptTemplateList'));
 // T05：测试点评审（按文档查看，所以路由带 docId）
 const TestPointReviewPage = lazy(() => import('@/pages/testpoints/TestPointReviewPage'));
+// T12-2a：测试点评审落地页（选文档 → 进评审），给侧栏第 6 个模块一个落脚点
+const TestPointPickerPage = lazy(() => import('@/pages/testpoints/TestPointPicker'));
 // T07-3+T08 前端合并批：任务 + 用例
 const TaskListPage = lazy(() => import('@/pages/tasks/TaskList'));
 const TaskDetailPage = lazy(() => import('@/pages/tasks/TaskDetail'));
@@ -162,6 +164,16 @@ export const router = createBrowserRouter([
             element: (
               <PageBoundary>
                 <PromptTemplateListPage />
+              </PageBoundary>
+            ),
+          },
+          {
+            // T12-2a 测试点评审落地页：必须放在 `/testpoints/:docId` 之前，
+            // 让 `/testpoints` 这条静态路径先被匹配到（动态段会把空串也吃掉）
+            path: '/testpoints',
+            element: (
+              <PageBoundary>
+                <TestPointPickerPage />
               </PageBoundary>
             ),
           },

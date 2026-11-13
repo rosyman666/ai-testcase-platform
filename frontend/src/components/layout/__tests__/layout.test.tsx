@@ -19,8 +19,16 @@ import TopBar from '@/components/layout/TopBar';
 import { useAuthStore } from '@/store/authStore';
 import theme from '@/theme';
 
-/** 侧栏应有的 6 个导航文案（顺序 = 侧栏展示顺序）。 */
-const NAV_LABELS = ['概览', '需求文档', '提示词模板', '生成任务', '用例评审', '指标看板'];
+/** 侧栏应有的 7 个导航文案（顺序 = 侧栏展示顺序）。 */
+const NAV_LABELS = [
+  '概览',
+  '需求文档',
+  '测试点评审',
+  '提示词模板',
+  '生成任务',
+  '用例评审',
+  '指标看板',
+];
 
 /**
  * 打桩 `window.matchMedia`，让 `useMediaQuery` 走桌面分支。
@@ -92,7 +100,7 @@ describe('components/layout/SideNav — 导航项与选中态', () => {
     vi.unstubAllGlobals();
   });
 
-  it('桌面断点渲染出 6 个导航项，文案与顺序稳定', () => {
+  it('桌面断点渲染出 7 个导航项，文案与顺序稳定', () => {
     renderWithProviders(<SideNav open={false} onClose={() => undefined} />, '/');
 
     const labels = getNavLinks().map((link) => (link.textContent ?? '').trim());

@@ -29,9 +29,11 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
     expect(matchNavItem('/tasks/abc')?.key).toBe('tasks');
   });
 
-  it('不在导航表里的 /testpoints/:docId 不命中任何项（顶栏退回「控制台」）', () => {
-    // 测试点评审从文档详情页跳进去，导航里没有独立入口，所以这里应当无命中
-    expect(matchNavItem('/testpoints/1')).toBeUndefined();
+  it('/testpoints/:docId 按前缀命中测试点评审（T12-2a 起它有了导航项）', () => {
+    // T12-1b 时测试点评审没有落地页、也没进导航表，这条断言是"不命中"；
+    // T12-2a 补了 /testpoints 落地页与导航项后，详情路径由前缀规则命中，断言随之翻转
+    expect(matchNavItem('/testpoints/1')?.key).toBe('testpoints');
+    expect(matchNavItem('/testpoints')?.key).toBe('testpoints');
   });
 
   it('未知路径返回 undefined', () => {
@@ -54,6 +56,19 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
     expect(NAV_ITEMS.filter((item) => item.exact === true)).toHaveLength(1);
   });
 
+  it('导航表恰好 7 项，覆盖 6 个业务模块 + 概览', () => {
+    expect(NAV_ITEMS).toHaveLength(7);
+    expect(NAV_ITEMS.map((item) => item.key)).toEqual([
+      'overview',
+      'docs',
+      'testpoints',
+      'prompts',
+      'tasks',
+      'cases',
+      'metrics',
+    ]);
+  });
+
   it('导航表的 key 与 path 唯一，避免选中态出现歧义', () => {
     expect(new Set(NAV_ITEMS.map((item) => item.key)).size).toBe(NAV_ITEMS.length);
     expect(new Set(NAV_ITEMS.map((item) => item.path)).size).toBe(NAV_ITEMS.length);
@@ -65,18 +80,17 @@ describe('constants/nav — resolveModuleTitle 顶栏标题解析', () => {
     expect(resolveModuleTitle('/')).toBe('概览');
     expect(resolveModuleTitle('/docs/123')).toBe('需求文档');
     expect(resolveModuleTitle('/tasks/abc')).toBe('生成任务');
+    expect(resolveModuleTitle('/testpoints')).toBe('测试点评审');
   });
 
-  it('有页面但侧栏没有入口的 /testpoints/:docId 不能被显示成「控制台」', () => {
-    // T12-1b W2 回归点：测试点评审从文档详情页跳进去，侧栏没有它的导航项，
-    // 只靠 matchNavItem 会回退成「控制台」，属于误导性文案
+  it('/testpoints/:docId 按前缀命中导航项，不落到「控制台」', () => {
+    // T12-1b W2 回归点：这一页曾经因为侧栏没有入口、只靠 matchNavItem 查不到而
+    // 显示成「控制台」。T12-2a 给测试点评审补了导航项后，前缀规则直接命中，
+    // 当初为它加的 EXTRA_TITLES 正则因此成了死代码、已删除；这条断言守住行为不变。
     expect(resolveModuleTitle('/testpoints/9')).toBe('测试点评审');
     expect(resolveModuleTitle('/testpoints/1234567890')).toBe('测试点评审');
-  });
-
-  it('额外标题表按动态段正则匹配，/testpoints 本身（无 docId）仍回退默认标题', () => {
-    expect(resolveModuleTitle('/testpoints')).toBe(FALLBACK_MODULE_TITLE);
-    expect(resolveModuleTitle('/testpoints/9/extra')).toBe(FALLBACK_MODULE_TITLE);
+    // 多级后缀也走前缀命中
+    expect(resolveModuleTitle('/testpoints/9/extra')).toBe('测试点评审');
   });
 
   it('未知路径回退「控制台」，且返回值永不为空串', () => {

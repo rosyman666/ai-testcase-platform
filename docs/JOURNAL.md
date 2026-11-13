@@ -552,6 +552,73 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 ---
 
+## 2026-11-08 · 阶段 10 · T07-2 / T08 / T07-3（降级落地 + 评审闭环 + 前端合批）
+
+### 做了什么
+1. **T07-2 三档降级**（`c995250` / `9334731`）：`CaseGenerateOrchestrator` + `RetryPolicy` + `DegradePolicy` + `GenerationContext`；repair 重试走 `scene="CASE_REPAIR"` 单列成本，`attemptNo` 不递增（恒 `item.attempts + 1`）、`request.degraded` 恒 `false`；宽松解析落 `confidence=0.500`。
+2. **T08 评审闭环**（`e3cf9c2` / `c0f19eb`）：三分支（`ACCEPT` / `REJECT` / 编辑走 `PUT`）+ `old_content` / `new_content` 快照 + 批量（`ids[]`、上限 200、只处理 `DRAFT`）+ 台账只追加不覆盖；补 `GET /api/tasks` 与 `/api/tasks/{id}/items` 两个前端必需端点。
+3. **T07-3 前端合批**（`3c6f86c`）：SSE 地基（`api/sse.ts` + `hooks/useTaskStream.ts`）+ 任务页 + 评审看板；45s 看门狗 = 2×20s 心跳周期。
+4. **文档收口**（`2bdb6ba`）+ 列表默认排序修正（`5f73481`，补齐 10 例回归）。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| `/items` 作为明细唯一权威来源 | 任务详情 VO 与 SSE `snapshot` 字段集不一致时，明细只能有一处真源 | 让前端按 `snapshot` 自己拼明细（字段漂移后无法排查） |
+| `progress` 是否还在来 **不能**当存活判据 | 长耗时的单个 item 期间 `progress` 本来就不动，据此判死会误杀正常任务 | 用 `progress` 间隔做超时 |
+| 45s 看门狗写成 `2 * HEARTBEAT_MS` 而非字面量 | 字面量与后端 20s 心跳是两处真源，改一处就静默失配 | 硬编码 `45000` |
+
+### 踩坑记录
+- **D-47 / D-48**：`done` 帧实际推完整 `snapshot`（无 `summary` 子对象）、`error` 帧有**两种形状**（订阅拒绝 = `ApiResponse.fail` 同形 / 执行失败 = `{taskId,errorCode,errorMsg,summary}`）。照文档写 `payload.summary.totalCases` 恒 `undefined`，`status` 判不出 → 前端无限重连，而 `tsc` 不报错、`t06sse` 也不红。
+- **D-49 / D-50 / D-51**：建任务入参多必填 `scene` 且无 `templateCode`；用例四行 CRUD 的筛选维度 / HTTP 方法 / 字段名（`PATCH`→`PUT`、`caseIds`→`ids`）全对不上；任务详情 VO 无 tokens/cost。这 5 条的共同特征是**表象在网络层、根因在契约层**。
+- **D-46 仍未解**：`t07degrade.py` E 段 few-shot 探针的 `max(20, 15%)` 阈值在 p1=774 时要求 +116 token，而单条素材实测约 36 token，**结构上永远判不出来**，结果 INCONCLUSIVE，**未折算成 PASS**。
+
+### 下一步
+- T09 用例导出（`cases.xlsx` 双 sheet + `junit.zip`）、T11 指标看板。`#48 /api/metrics/execution` 依赖 T10，届时单独裁决。
+
+---
+
+## 2026-11-12 · 阶段 11 · T09/T11 导出与指标看板（验收 2026-11-13）
+
+### 做了什么
+1. **T09 导出后端**（`23a5781` / `b29f5aa`）：`GET /api/export/cases.xlsx`（「用例」「统计」双 sheet，单次查询同一批快照）+ `GET /api/export/junit.zip`（用例 `*.java` + zip 内自带 `Test`/`DisplayName` 注解桩与极简 runner + `README.txt`）。
+2. **T11 指标后端**（`5ae1165`）：`MetricsMapper.xml`（仓库首个 `<if>` 动态 SQL，11 个 `<select id>`）+ 5 个端点（#43~#47）+ 16 例单测。
+3. **契约对齐**（`151dd9a`）：`long` → JSON string（camelCase VO 计数改 string + `Number` 转换），7 例回归。
+4. **前端**（`425fad1` / `3f0454b` / `7f9591b`）：`CaseExportDialog` + 指标看板 4 Tab（A/B/C/D 0 值分层）+ 首页过渡期三入口。
+5. **文档**（`3aadcca`）：增量 PRD v1.2（521 行）+ `docs/07` 增量设计（1340 行）+ 架构文档契约同步。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| **#48 `/api/metrics/execution` 本批跳过、待 T10** | `execution_run` / `execution_result` 两表已建但 **0 行**、T10 导入链路未交付，端点交付即空态且不满足 §6 T11 验收 ①–⑦ 任何一条 | 写占位实现 / 放假数据（违反「不写永久占位」纪律） |
+| **JUnit classpath 方案 A（纯 JDK + 极简 runner）** | fat-jar 运行时不含 `junit-jupiter-api`；方案 A 无外部依赖且能真调 JDK17 `JavaCompiler` 编译全部 `.java`。zip 内自供注解桩，编译期零外部 jar | 依赖 `~/.m2` 的 classpath（环境不可控）/ 打包 junit jar（体积与版本双负担） |
+| **导出端点不声明固定二进制 `produces`** | 失败要返回 `application/json` 的 `ApiResponse`（HTTP 200 + `code!=0`）；声明固定 `produces` 后 `@RestControllerAdvice` 吐 JSON 会内容协商失败 → **500 空 body**（同 D-35 的 SSE 陷阱） | `produces = {json, binary}` 二选一（Spring 仍会按 `Accept` 先选错） |
+| **成本严格 `SUM(llm_call_log.cost_micro)`，不在读取侧现算** | 台账是唯一真源；读取侧按 `model_price` 现算会拆出第二套口径 | 查询时 join 单价表实时乘算 |
+| **指标聚合 SQL 不加通用 `deleted=0`** | 五张指标源表（`gen_task` / `gen_task_item` / `test_case` / `case_review` / `llm_call_log`）**均无 `deleted` 列**；只有 `doc_source` 带软删 | 统一加 `deleted=0`（直接 `Unknown column`） |
+| **`from/to` 用固定 `+8` 偏移算术，不引入 `ZoneId`/`Clock`** | 与 SQL `DATE(created_at + INTERVAL 8 HOUR)` 同源，避免出现第二条时间真源；全链路存储与传输仍 UTC | `ZoneId.of("Asia/Shanghai")`（引入 DST 语义与第二条真源） |
+| **`ChartCard` 不 import recharts**（D-53） | 看板 4 个 Tab 只有 2 个真画图；壳若引 recharts 会让「打开看板」无条件拉起整个 `charts` chunk | 壳内统一渲染图表（懒加载边界失效） |
+| **`Home.tsx` 补过渡期三入口**（D-54） | 原设计只覆盖「导出入口挂在哪」，漏了「页面怎么到达」——T07/T08/T11 三页**无导航可达** | 维持「零改动」（真实用户只能手敲地址） |
+
+### 踩坑记录
+- **D-52**：`#36 junit.zip` 原设计无 `statuses`，而 xlsx 默认只导 `ACCEPTED,EDITED` 4 条；zip 若默认全量会生成 10 个含 `DRAFT`/`REJECTED` 的 `.java`，**同一任务两份产物条数对不上且不报错**（静默口径分叉）。已增可选 `statuses` 与 #35 同源，共用同一段白名单校验。
+- **D-55（列表默认排序方向，修复只覆盖一半）**：`GenTaskService.java:429`、`CaseService.java:190` 已在 `5f73481` 改为 `boolean isAsc = !desc` 并补 10 例回归（MP 的 `orderBy(condition, isAsc, column)` 第二参是 `isAsc`，直传 `isDesc()` 会把默认排序取反成 `created_at ASC`）；`DocService.java:727-731`、`TestPointService.java:251-255` **仍未修**——属已验收代码，本批不纳入（会翻转既有黑盒脚本的列表顺序断言），**留作独立技术债**。
+- **`docs/01:834` 的 `doc_id` 表述与 DDL 不符**（已在本批订正）：`llm_call_log` **没有 `doc_id` 列**（只挂 `gen_task_id`），按 docId 归集成本必须走 `llm_call_log → gen_task → doc_source` 两级 JOIN；照文档写 `l.doc_id` 直接 `Unknown column`。
+- **`ONLY_FULL_GROUP_BY` 的「假绿」风险**：用 `SET SESSION sql_mode=''` 绕过时，开发机绿、策略更严的托管实例报 `1055`；而关掉 `sql_mode` 的会话里验收**同样绿**。本批的验收脚本加了会话闸——`@@SESSION.sql_mode` 含 `ONLY_FULL_GROUP_BY` 与 `STRICT_TRANS_TABLES`（六项，`@@GLOBAL` 一致、全程无 `SET`），`MetricsMapper.xml` 的 11 个 `<select id>` × 2 个 `<if>` 分支 = **22 条 SQL 同会话实跑** rc=0、均返回结果集、无 `1055`；并加了**负例对照**（同会话执行违规 `GROUP BY` 确实抛 `ERROR 1055 (42000)`），否则分不清「真绿」与「宽松模式下的假绿」。
+- **成本 `0` 有三种成因**，不能混为一谈：`MOCK_PRICE_ZERO`（mock 单价为 0）、`FAILED_CALL_NO_TOKEN`（失败调用无 token）、`MODEL_PRICE_MISSING`（`deepseek-flash` **没有单价行**——这是**配置缺口**，不是代码缺陷）。把配置缺口误判成代码缺陷会把排查方向引向 `MockLlmProvider`，而真正方向是 `.env` 的 `AI_MODEL` 或历史验收脚本传参。
+- **分母 0 不能渲染成 0%**：「人还没评审」被渲染成「采纳率 0%」会被读成「模型全错了」，与 §8.3「未评审不代表模型失败」的立场直接相反——口径正确但表达误导，且不报错。前端改为置 `hasReviewData=false`、显示「暂无评审数据」。
+
+### 验收事实（2026-11-13）
+- **黑盒**：`t09t11.py`（仓库外，1945 行）→ **200 PASS / 0 FAIL / 0 WARN / 0 INCONCLUSIVE，exit 0，VERDICT PASS**（mock provider）。此前汇报的 192 已作废。
+- **后端单测**：**265 / 0 fail / 0 error / 7 skipped**（7 skip 是 `IdGenSeedingTest` 需真库口令）。
+- **前端**：5 files / 57 tests 全绿、`tsc --noEmit` 0 错、`vite build` 通过（`charts` chunk 403.87 kB / gzip 110.68 kB、`OverviewDashboard` 10.62 kB）。
+- **范围边界**：`#48` 未交付（待 T10）；`§6 T11` 依赖列保持 `T07, T08, T10` **不变**（那是设计依赖，不是缺陷）。
+
+### 下一步
+- **T05 收口（本批）**：`docs/01` §4.2 七端点契约、§2.2 目录树 `junit.zip`、§12 追加 13 条依赖（74 → 87）、§11.1 登记 D-52~D-54（51 → 54）、`docs/01:834` 订正、`CHANGELOG` 补 `### Changed`。
+- **T12**：真 `AppShell` 上线后统一收口 `Home.tsx` 的三入口过渡导航（D-54）。
+- **技术债**：`DocService.java:727-731` / `TestPointService.java:251-255` 的列表顺序问题（D-55 未修部分）；D-42 任务级 `error_code`（观测项）；D-46 few-shot 探针改二值判别。
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

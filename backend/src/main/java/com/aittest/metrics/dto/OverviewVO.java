@@ -59,7 +59,7 @@ public class OverviewVO {
 
     private long totalCompletionTokens;
 
-    /** totalCostMicro / max(acceptedCaseCount, 1)。 */
+    /** totalCostMicro / acceptedCaseCount（ACCEPTED+EDITED 计数）；分母为 0 时返回 0，不是 max(0,1)。 */
     private long unitCostMicro;
 
     /** 应用层 nearest-rank p50（毫秒）。 */

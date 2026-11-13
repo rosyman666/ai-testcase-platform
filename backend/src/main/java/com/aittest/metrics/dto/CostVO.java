@@ -35,7 +35,7 @@ public class CostVO {
 
     private long totalCompletionTokens;
 
-    /** totalCostMicro / max(acceptedCaseCount, 1)。 */
+    /** totalCostMicro / acceptedCaseCount（ACCEPTED+EDITED 计数）；分母为 0 时返回 0，不是 max(0,1)。 */
     private long unitCostMicro;
 
     /** ACCEPTED + EDITED（与采纳率分子同形）。 */

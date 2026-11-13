@@ -619,6 +619,57 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 ---
 
+## 2026-11-13 · 阶段 12 · T12 前端集成与交互打磨（T12-1 / T12-2a / T12-2b）
+
+### 做了什么
+1. **T12-1 布局壳**（`4ae14fd` 7 文件 +586/−124、`19c2eb3`、`f75b36c`、`de76216`）：`components/layout/{AppShell,SideNav,TopBar}.tsx` + `constants/nav.ts`。导航改成**单一真源**——`NAV_ITEMS` 同时驱动侧栏渲染、选中态判定与顶栏标题，路由表不再各自硬编码字符串。`routes/index.tsx` 改为 `AppShell` 布局路由套 10 条业务路由，`PageBoundary` 逐条叶子包。
+2. **T12-2a 测试点评审落地页**（`d73e0ba` 8 文件 +464/−35）：`pages/testpoints/TestPointPicker.tsx` + `/testpoints` 静态路由 + 侧栏第 6 项 + `constants/docStatus.ts`。至此「6 个模块 + 概览 = 侧栏 7 项」，验收① 的结构性缺口闭合。
+3. **T12-2b 状态映射收口**（`4024747` 4 文件 +278/−13）：`DocDetail` 删本地拷贝表改引共享函数、`StatusChip` 未知码加显式告警、补 4 例测试。
+4. **README 重写并推送**（`9151e0d` +121/−32）：原来停在 T01、落后 6 天；补默认账号、11 个核心端点、进度表与「已实现的关键设计」。Gitee 与 GitHub 双端同步。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| `Suspense` 边界**只放叶子**，`AppShell` 不包 `PageBoundary` | 否则任一页面 chunk 未就绪时整个壳（含侧栏顶栏）被替换成转圈，用户点一下菜单整页闪白 | 在壳上包一层统一兜底——省事但把「局部加载」放大成「整页重绘」 |
+| 壳内兜底高度用 `height:100%`，`/login` 保持 `minHeight:100vh` | `main` 是 `h-screen` flex 列里的 `flex-1 + min-h-0`，used height 确定，`100%` 能解析且与 `main` 等高 → 偏移 0。`/login` 父级是 `body`（无确定高度），`100%` 会塌成 0 | 统一用一个值——两边父级完全不同，统一必然有一边错 |
+| 解析状态**与三域并列**而非并入 `ALL_STATUS`（D-56） | 并入会让 `isStatusKey('PARSED')` 对任务/用例/执行结果三个域都返回 `true`，语义污染 | 塞进 `ALL_STATUS` 让 `StatusChip` 直接可用——一行代码换来三个域的判定失真 |
+| `StatusChip` 去重放 module 级 `Set<string>` | `useRef` 是每实例一份，一屏 50 行脏状态就是 50 条 warn；被刷屏的护栏等于没有护栏 | `useRef` / 组件内 state |
+| 未知码**显示仍是裸 code** | 那是排障唯一的线索；换成「未知状态」等于把线索删掉让人去翻控制台 | 统一显示「未知状态」——界面干净了，问题变难查了 |
+| 告警**不放** `getStatusMeta()` | 它是纯查表函数，未知返回 `null` 是写进 `status.test.ts:74` 的契约；塞副作用会污染所有潜在消费者 | 在查表函数里打 warn——一次调用链会打出多条，且测试断言被打乱 |
+| `StatusChip` 告警**不做** `import.meta.env.DEV` 门控 | vitest 的 mode 是 `test`、`DEV` 恒真，门控在 CI 上买不到任何东西；而生产恰恰是「后端加枚举、前端没同步」最先暴露的地方 | 只在 DEV 告警——等于上线后彻底静默 |
+| 测试三层：正例 / 负例 / **哨兵** | 前两例分工是「守既有行为」，对「引用 vs 拷贝」**零判别力**；只有哨兵能证明真在调用共享函数 | 只写正例——两份实现都过，测了等于没测 |
+| 哨兵值用 `__SHARED_FN__` 而非中文 | 详情页中文文案密集，中文哨兵有撞车误绿风险；全下划线英文串全仓唯一 | 中文占位串 |
+| **撤掉** `vi.resetModules()` | `vitest.config.ts` 默认 `isolate: true`，每文件全新模块注册表，本就不需要；而带 hooks 的组件 + resetModules 会出 `Invalid hook call` 或 emotion style cache 分裂。且它对**静态 import 是 no-op**——要真生效必须 reset 后动态 `await import()`，那会连带重求值 `react`/`@mui/material` | resetModules + 动态 import——为了一条测试引入双 React 风险 |
+| QA 按**提交 diff** 判，忽略脏工作区 | 工作区被下一批改动占住时，红绿无法归因到提交；按 diff 判同样可归因，且不用重跑 | 要求 QA 等干净工作区——串行等待，成本换不到额外信息 |
+
+### 踩坑记录
+- **`PageBoundary` 兜底高度改了两轮才对**：第一轮 `100vh`，比 `main` 高 49px，闪出多余滚动条；第二轮改 `40vh`，溢出归零但**转圈偏上**（1280 下 −187px、1920 下 −271px）。**我第一轮只验了「有没有滚动条」，没验「还居不居中」** —— 修溢出的时候顺手把居中也测一遍，否则修掉一个症状换来另一个。最终 `height:100%`，真 Chrome 实测两个断点偏移都是 0。
+- **我一度断言「`h-full` 拿不到参照」，这话只在 `/login` 成立**：壳内 `main` 是 `flex-1 + min-h-0`，高度确定，`100%` 能解析。当时把「`/login` 的特殊性」泛化成了全局结论，已更正。
+- **`f75b36c` 误带他人探针的临时 `export function PageBoundary`**：另一个 worker 的临时改动挂在工作区时我 `git add routes/index.tsx` 提交，把半成品打包进仓库（`de76216` 收回）。规矩：`git add` 前对非本人改动先 `git diff`；worker 做探针实测一律改用工作区外副本。
+- **`DocDetail` 漏收，根因是我的规格**：我把「渲染解析状态的地方」数成 2 个（`DocList` + 新落地页），实际 3 个（还有 `DocDetail`）；同时又下了一条「除 `DocList` 外不动其他业务页面」的死约束。**数量数错 + 禁改范围写死，两条叠加必然漏**。后来是 grep `PARSE_STATUS_META[` 数出 2 处下标才发现的。
+- **我给 `StatusChip` 的规格本身是错的**：让新页面「状态用 `StatusChip`，传 `code={row.parseStatus}`」，但 `PARSED` 不在 `ALL_STATUS`（`grep -c` = 0）→ 会渲染成灰色裸英文，与 `/docs` 页绿色「已解析」不一致。改用 `Chip` + `getParseStatusMeta`。
+- **「负例测同源」这个说法是假的**：未知 code 恰好是两份实现**唯一逐字重合**处（都是 `?? { label: code, color: 'default' }`），改前改后都过。改为「负例守**既有行为**」（后端加枚举时详情页别白屏），并明确写「本例不是用来防拷贝的」。
+- **`grep -c` 计数为 0 时退出码是 1**：读数时不能只看退出码，`0` 仍会打印。
+- **Vite dev server 反复崩 4 次**：新增 MUI 图标（`ChecklistRounded`）触发依赖重优化，要删 `deps_temp_*`（108/168/174/175/269 个文件），撞本机批量删除保护（阈值 50）→ Vite 未兜住异常直接退出 → 5173 变 502。**修法是不删、移出**到仓库外的临时目录（可回溯）再重启。属环境限制，但**每次有人加新图标都会复发**。
+- **探针页首次量出 `mainClientHeight: 28`**：探针没 import `@/index.css`，Tailwind 的 `h-screen`/`flex-1`/`min-h-0` 全部失效。补 import 后 `main=656`（1280）/`936`（1920），数据才有效。
+- **Vite 只监听 IPv6**：`http://localhost:5173` 正常、`127.0.0.1:5173` 是 000；curl 必须加 `--noproxy '*'`，否则走环境代理拿 502。
+
+### 验收事实（2026-11-13）
+- **前端**：**10 files / 86 tests 全绿**（基线 82 + 本轮新增 4）；`tsc --noEmit` **0 错**；`vite build` 通过，`charts` 仍是独立 chunk（403.87 kB / gzip 110.68 kB）。
+- **映射表收敛**：`grep -c 'PARSE_STATUS_META\['` 从 **2 → 1**（只剩 `docStatus.ts:59` 函数本体）。
+- **变异自证**：把 `DocDetail` 退回本地拷贝表后复跑，**正例与负例仍绿、哨兵 `__SHARED_FN__` 变红** —— 与设计意图一致（前两例本就不承担判别职责）。
+- **浏览器层（仅 T12-1）**：QA 用 Playwright + 本机 Chrome 实跑 **9 路由 × 1280/1920 = 18 组全 PASS**（`scrollWidth === clientWidth`、`body.scrollHeight === innerHeight`、Drawer 恰好 240px）。
+- **范围边界**：`/testpoints` 落地页（T12-2a）**只有 jsdom 覆盖，没进过浏览器**；`getParseStatusMeta` 的未知码分支**没有直接单测**（在 `DocDetail.test.tsx` 里被 mock 包了一层，只间接走到）。这两条如实记账，不写成「验过了」。
+- **未完成的眼验项**：`/metrics` 四个 Tab 的真实渲染、`/cases` 导出弹窗、xlsx 用 Excel 与 WPS **各打开一次**验中文不乱码。
+
+### 下一步
+- **T12-3**：其余页面的三态全量盘查 + `grep -rn 'alert('` 清零核对 + `enqueueSnackbar` 统一收口验证；补 `getParseStatusMeta` 未知码直接单测。
+- **T12-1 遗留**：`Home.tsx` 的三入口过渡导航待 `AppShell` 稳定后删除（D-54）。
+- **技术债**：`DocService.java:727-731` / `TestPointService.java:251-255` 列表默认排序方向（D-55 未修部分）；D-42 任务级 `error_code`；D-46 few-shot 探针改二值判别。
+- **待接入**：仓库当前**没有 CI**（无 `.github/workflows`），接入时建议对「测试文件数」加下限断言——本轮就出现过用例数从 82 涨到 86 而无人核对的窗口。
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

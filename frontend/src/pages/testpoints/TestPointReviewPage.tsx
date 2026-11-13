@@ -225,6 +225,22 @@ export default function TestPointReviewPage(): JSX.Element {
           <Box className="flex justify-center py-10">
             <CircularProgress size={28} />
           </Box>
+        ) : listQuery.isError ? (
+          // 必须排在 rows.length === 0 之前：请求失败时 rows 也是空数组，
+          // 顺序反了会把"加载失败"显示成"还没有测试点"，引导用户去点"开始抽取"
+          // —— 而那正是刚失败的那次操作
+          <Box className="py-6">
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" size="small" onClick={() => void listQuery.refetch()}>
+                  重试
+                </Button>
+              }
+            >
+              测试点列表加载失败，请检查网络或后端服务是否已启动
+            </Alert>
+          </Box>
         ) : rows.length === 0 ? (
           <Box className="py-10 text-center">
             <Typography variant="body1" color="text.secondary">

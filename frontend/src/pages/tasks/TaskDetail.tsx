@@ -104,7 +104,14 @@ export default function TaskDetail(): JSX.Element {
       <EmptyState
         variant="error"
         title="任务不存在或加载失败"
-        action={<Button onClick={() => navigate('/tasks')}>返回列表</Button>}
+        description={taskError ? '请检查网络或后端服务是否已启动' : '该任务可能已被删除'}
+        action={
+          // 两个动作都要给：只给「返回列表」的话，一次网络抖动人就得重新找回来路
+          <Box className="flex gap-2">
+            <Button onClick={() => void refetchTask()}>重试</Button>
+            <Button onClick={() => navigate('/tasks')}>返回列表</Button>
+          </Box>
+        }
       />
     );
   }

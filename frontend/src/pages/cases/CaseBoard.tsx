@@ -64,7 +64,7 @@ export default function CaseBoard(): JSX.Element {
   // 自动下一条：当前焦点行
   const [selectedIndex, setSelectedIndex] = useState(-1);
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['cases', query.page, query.size, taskIdFilter, statusFilter, keyword],
     queryFn: () =>
       listCases({
@@ -279,6 +279,15 @@ export default function CaseBoard(): JSX.Element {
       {/* 列表 */}
       {isLoading ? (
         <EmptyState variant="loading" title="加载中…" />
+      ) : isError ? (
+        // 必须排在 empty 之前：请求失败时 cases 也是空数组，
+        // 先判 length===0 会把"加载失败"显示成"暂无用例"，用户会去做无用的操作
+        <EmptyState
+          variant="error"
+          title="用例列表加载失败"
+          description="请检查网络或后端服务是否已启动"
+          action={<Button onClick={() => void refetch()}>重试</Button>}
+        />
       ) : cases.length === 0 ? (
         <EmptyState variant="empty" title="暂无用例" description="先运行用例生成任务" />
       ) : (

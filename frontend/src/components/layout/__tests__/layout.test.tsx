@@ -10,10 +10,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider } from '@mui/material/styles';
 import type { ReactElement } from 'react';
+import AppShell from '@/components/layout/AppShell';
 import SideNav from '@/components/layout/SideNav';
 import TopBar from '@/components/layout/TopBar';
 import { useAuthStore } from '@/store/authStore';
@@ -169,5 +170,87 @@ describe('components/layout/TopBar — 账号兜底与标题', () => {
     renderWithProviders(<TopBar onOpenNav={() => undefined} />, '/testpoints/9');
 
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('测试点评审');
+  });
+});
+
+/** 渲染即抛错的页面，用来验证错误边界的位置。 */
+function Boom(): JSX.Element {
+  throw new Error('boom-in-page');
+}
+
+/** 正常页面。 */
+function Fine(): JSX.Element {
+  return <div>用例看板内容</div>;
+}
+
+/**
+ * 带布局路由的渲染：`/docs` 崩、`/cases` 正常。
+ *
+ * @returns RTL 的 render 结果
+ */
+function renderShellWithCrashingRoute(): ReturnType<typeof render> {
+  return render(
+    <ThemeProvider theme={theme}>
+      <MemoryRouter initialEntries={['/docs']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/docs" element={<Boom />} />
+            <Route path="/cases" element={<Fine />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </ThemeProvider>,
+  );
+}
+
+describe('components/layout/AppShell — 页面崩溃时的韧性', () => {
+  beforeEach(() => {
+    mockMatchMedia(true);
+    useAuthStore.setState({
+      token: 'test-token',
+      userId: '1',
+      username: 'alice',
+      displayName: '爱丽丝',
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    });
+    // React 会把错误同时打到 console.error，不打桩会刷满测试输出
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    useAuthStore.setState({
+      token: null,
+      userId: null,
+      username: null,
+      displayName: null,
+      expiresAt: null,
+    });
+    localStorage.clear();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('页面渲染抛错时兜底出现在主区，侧栏与顶栏仍在', () => {
+    renderShellWithCrashingRoute();
+
+    expect(screen.getByText('页面渲染出错')).toBeTruthy();
+    // 这两条是"错误边界放在 main 内、只包 Outlet"的直接证据：
+    // 边界若包在根上，整棵树会被卸载，侧栏与顶栏一起消失
+    expect(screen.getByRole('navigation', { name: '主导航' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '账号菜单' })).toBeTruthy();
+  });
+
+  it('切到另一条路由后不再显示上一页的报错（key=pathname 生效）', () => {
+    renderShellWithCrashingRoute();
+
+    expect(screen.getByText('页面渲染出错')).toBeTruthy();
+
+    // 错误边界一旦进入 error 状态不会自愈；不按路径换 key 的话，
+    // 这一下点击之后仍然会看到 /docs 的报错
+    fireEvent.click(screen.getByRole('link', { name: '用例评审' }));
+
+    expect(screen.getByText('用例看板内容')).toBeTruthy();
+    expect(screen.queryByText('页面渲染出错')).toBeNull();
   });
 });

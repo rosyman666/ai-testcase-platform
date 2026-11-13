@@ -6,8 +6,9 @@
  */
 
 import { useCallback, useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import Box from '@mui/material/Box';
+import ErrorBoundary from '@/components/common/ErrorBoundary';
 import SideNav from '@/components/layout/SideNav';
 import TopBar from '@/components/layout/TopBar';
 
@@ -24,6 +25,7 @@ import TopBar from '@/components/layout/TopBar';
  */
 export default function AppShell(): JSX.Element {
   const [navOpen, setNavOpen] = useState(false);
+  const { pathname } = useLocation();
 
   // 用 useCallback 固定引用：两个回调会传给 Drawer / TopBar，
   // 每次渲染都新建函数会让 memo 化的子组件白重渲染
@@ -46,7 +48,13 @@ export default function AppShell(): JSX.Element {
         {/* min-h-0 同理：纵向 flex 子项的 min-height 也是 auto，
             不加则主区只会被内容撑高、自身不滚，滚动落回 body */}
         <Box component="main" className="min-h-0 flex-1 overflow-y-auto">
-          <Outlet />
+          {/* 错误边界放在 main 内、只包 Outlet：页面渲染崩溃时侧栏与顶栏还在，
+              用户能直接切去别的模块；包在根上则一次页面崩溃等于整个应用退出。
+              key 按路径给：错误边界一旦进入 error 状态不会自愈，不换 key 的话
+              切到别的路由仍看到上一页的报错。 */}
+          <ErrorBoundary key={pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </Box>
       </Box>
     </Box>

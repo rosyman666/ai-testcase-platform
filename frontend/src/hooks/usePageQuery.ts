@@ -1,10 +1,21 @@
 /**
  * 分页状态 ↔ 后端 `PageQuery` 参数的双向映射。
  *
- * **`page` 0-based ↔ 1-based 的换算只允许在这一个文件里**。
- * 错一次就是整页数据错位，且看上去像"后端数据乱序"（§6.1）。
+ * **换算规则只有一条**：`uiPage = apiPage - 1`，两个方向必须由同一个数字决定。
+ * MUI `TablePagination` 的 `page` 是 0-based（第一页 = 0），后端 `PageQuery` 是
+ * 1-based（第一页 = 1）。错一次的后果不是报错，是整页数据错位 + 看起来像
+ * "后端数据乱序"，且只翻一次页看不出来。
  *
- * MUI `TablePagination` 的 `page` 是 0-based（第一页 = 0），后端 `PageQuery` 是 1-based（第一页 = 1）。
+ * **两种落地形态，都合法，但不要第三种**：
+ * 1. `page` / `size` 独立管理 → 用本 hook，换算由 `query` 统一给出；
+ * 2. `page` 与筛选条件塞在**同一个 state 对象**里 → 换算只能内联写
+ *    （`page={query.page - 1}` 配 `page: nextPage + 1`）。这么做不是偷懒：
+ *    "搜索 + 回第一页"必须原子生效，拆成本 hook + 独立的筛选 state 会变成两次
+ *    setState，中间那一帧会用旧关键词 + 新页码发一次请求。
+ *    当前内联的两处：`pages/docs/DocList.tsx`、`pages/testpoints/TestPointPicker.tsx`。
+ *
+ * 无论哪种形态，`onRowsPerPageChange` 都必须把页码重置为第一页——换页大小后
+ * 停在第 5 页，用户看到的是一个不存在的页。
  */
 
 import { useState, useCallback, useMemo } from 'react';

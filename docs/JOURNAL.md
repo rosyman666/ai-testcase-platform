@@ -626,6 +626,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 2. **T12-2a 测试点评审落地页**（`d73e0ba` 8 文件 +464/−35）：`pages/testpoints/TestPointPicker.tsx` + `/testpoints` 静态路由 + 侧栏第 6 项 + `constants/docStatus.ts`。至此「6 个模块 + 概览 = 侧栏 7 项」，验收① 的结构性缺口闭合。
 3. **T12-2b 状态映射收口**（`4024747` 4 文件 +278/−13）：`DocDetail` 删本地拷贝表改引共享函数、`StatusChip` 未知码加显式告警、补 4 例测试。
 4. **README 重写并推送**（`9151e0d` +121/−32）：原来停在 T01、落后 6 天；补默认账号、11 个核心端点、进度表与「已实现的关键设计」。Gitee 与 GitHub 双端同步。
+5. **T12-3 三态与 `alert` 全量盘查**（`7446c53` / `3602005` / `e84129d`）：验收③ 已达标（`alert(` 与 `window.confirm` 全仓 0 处，提示统一走 `toast()` → `enqueueSnackbar` 桥）；验收④ 分页换算五处全对、排序侧无对齐对象；验收② 有一处**系统性缺法**——错误分支写在「数组长度为 0」之后，三页已补并各配回归；文件清单里的 `ErrorBoundary` 补齐（另三个刻意不建，见 D-57）。
 
 ### 关键决策与理由
 | 决策 | 理由 | 被否决的方案 |
@@ -653,20 +654,24 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **Vite dev server 反复崩 4 次**：新增 MUI 图标（`ChecklistRounded`）触发依赖重优化，要删 `deps_temp_*`（108/168/174/175/269 个文件），撞本机批量删除保护（阈值 50）→ Vite 未兜住异常直接退出 → 5173 变 502。**修法是不删、移出**到仓库外的临时目录（可回溯）再重启。属环境限制，但**每次有人加新图标都会复发**。
 - **探针页首次量出 `mainClientHeight: 28`**：探针没 import `@/index.css`，Tailwind 的 `h-screen`/`flex-1`/`min-h-0` 全部失效。补 import 后 `main=656`（1280）/`936`（1920），数据才有效。
 - **Vite 只监听 IPv6**：`http://localhost:5173` 正常、`127.0.0.1:5173` 是 000；curl 必须加 `--noproxy '*'`，否则走环境代理拿 502。
+- **`vitest` 不做类型检查**：本轮写 `CaseBoard.test.tsx` 时 import 了 `@/types/case`（正确是 `@/types/cases`），测试 **101 条全绿**，`tsc --noEmit` 才报 TS2307。esbuild 只剥类型、不校验——**测试绿不等于能编译**，两个命令缺一不可。同批还踩到第二个坑：`npx tsc --noEmit | tail -8; echo $?` 打出来的 `0` 是 **`tail` 的退出码**，不是 tsc 的；要拿真实状态必须重定向到文件再取 `$?`。
+- **错误态的 `if` 链顺序**：`isLoading → length === 0 → 列表` 这个写法在正常路径下永远是对的，因为出错时 `records` 也是空数组——症状不是白屏或报错，而是「加载失败」显示成「暂无用例」，且**空态文案会引导用户去做刚好失败的那件事**。这类缺陷 grep `isError` 查不出来（`CaseBoard` 连 `error` 都没解构），必须逐个页面看分支顺序。
 
 ### 验收事实（2026-11-13）
-- **前端**：**10 files / 86 tests 全绿**（基线 82 + 本轮新增 4）；`tsc --noEmit` **0 错**；`vite build` 通过，`charts` 仍是独立 chunk（403.87 kB / gzip 110.68 kB）。
+- **前端**：**14 files / 101 tests 全绿**（T12 起点是阶段 11 的 5 files / 57 tests，本轮净增 9 个文件 / 44 例）；`tsc --noEmit` **0 错**；`vite build` 通过，`charts` 仍是独立 chunk（403.87 kB / gzip 110.68 kB）。
 - **映射表收敛**：`grep -c 'PARSE_STATUS_META\['` 从 **2 → 1**（只剩 `docStatus.ts:59` 函数本体）。
-- **变异自证**：把 `DocDetail` 退回本地拷贝表后复跑，**正例与负例仍绿、哨兵 `__SHARED_FN__` 变红** —— 与设计意图一致（前两例本就不承担判别职责）。
+- **变异自证（四次，全部命中）**：① `DocDetail` 退回本地拷贝表 → 正例与负例仍绿、哨兵 `__SHARED_FN__` 变红；② `CaseBoard` 的空态分支提到错误态之前 → 「错误态不被空态吞掉」那条变红、另一条仍绿；③ 去掉 `usePageQuery` 的 `+ 1` → 6 例全红；④ 去掉 `ErrorBoundary` 的 `key={pathname}` → 「切路由不粘连」那条变红、其余 7 条仍绿。
+- **验收逐条**：① 结构闭合（侧栏 7 项 / 静态路由 10 条 / `matchNavItem` 9 输入单测）；② 页面级已达成（弹层走 `toast` 是刻意设计）；③ 已达成（`alert` 与 `confirm` 均 0 处）；④ 已达成（换算五处全对 + hook 有测试；排序 UI 未暴露，无对齐对象）；⑤ `tsc` 0 错；⑥ 两个断点实测偏移 0（**限 T12-1 那 18 组**）。
 - **浏览器层（仅 T12-1）**：QA 用 Playwright + 本机 Chrome 实跑 **9 路由 × 1280/1920 = 18 组全 PASS**（`scrollWidth === clientWidth`、`body.scrollHeight === innerHeight`、Drawer 恰好 240px）。
-- **范围边界**：`/testpoints` 落地页（T12-2a）**只有 jsdom 覆盖，没进过浏览器**；`getParseStatusMeta` 的未知码分支**没有直接单测**（在 `DocDetail.test.tsx` 里被 mock 包了一层，只间接走到）。这两条如实记账，不写成「验过了」。
+- **范围边界**：`/testpoints` 落地页（T12-2a）**只有 jsdom 覆盖，没进过浏览器**；`getParseStatusMeta` 的未知码分支**没有直接单测**（在 `DocDetail.test.tsx` 里被 mock 包了一层，只间接走到）；`ErrorBoundary` 的兜底 UI 只有 jsdom 证据。三条如实记账，不写成「验过了」。
 - **未完成的眼验项**：`/metrics` 四个 Tab 的真实渲染、`/cases` 导出弹窗、xlsx 用 Excel 与 WPS **各打开一次**验中文不乱码。
 
 ### 下一步
-- **T12-3**：其余页面的三态全量盘查 + `grep -rn 'alert('` 清零核对 + `enqueueSnackbar` 统一收口验证；补 `getParseStatusMeta` 未知码直接单测。
+- **T12 收尾仅剩一件事**：`/testpoints` 在真浏览器里补一次 1280/1920 实测（其余 9 路由那 18 组已在 T12-1 验过）。
 - **T12-1 遗留**：`Home.tsx` 的三入口过渡导航待 `AppShell` 稳定后删除（D-54）。
-- **技术债**：`DocService.java:727-731` / `TestPointService.java:251-255` 列表默认排序方向（D-55 未修部分）；D-42 任务级 `error_code`；D-46 few-shot 探针改二值判别。
-- **待接入**：仓库当前**没有 CI**（无 `.github/workflows`），接入时建议对「测试文件数」加下限断言——本轮就出现过用例数从 82 涨到 86 而无人核对的窗口。
+- **T10 执行结果导入**：`/metrics/execution`（§4.2 #48）就等它——`execution_run` / `execution_result` 两表已建但 0 行，端点交付即空态，所以当时跳过而非放假数据。
+- **技术债**：`DocService.java:727-731` / `TestPointService.java:251-255` 列表默认排序方向（D-55 未修部分）；D-42 任务级 `error_code`；D-46 few-shot 探针改二值判别；`getParseStatusMeta` 未知码补直接单测。
+- **待接入**：仓库当前**没有 CI**（无 `.github/workflows`），接入时建议对「测试文件数」加下限断言——本轮就出现过用例数从 82 涨到 101 而无人核对的窗口。
 
 ---
 

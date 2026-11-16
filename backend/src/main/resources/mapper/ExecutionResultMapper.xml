@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  execution_result 的批量写入 / 映射回填 / 规则归因 / 分类分布。
+  BaseMapper 拼不出批量 CASE 与聚合，故手写。
+
+  ## created_at 一律交给数据库
+  列清单里没有 created_at（DEFAULT CURRENT_TIMESTAMP(3)，会话时区已由 JDBC 钉在 +00:00）。
+  应用侧填 = 给审计列引入 JVM 时钟这第二个来源，与 gen_task_item 的注释同一口径。
+
+  ## id 由调用方生成
+  insertBatch 绕开 BaseMapper.insert，走不到 MP 的主键填充，而 id 是 NOT NULL 无默认值。
+  有了 id，回填 case_id 才能用一条 CASE 语句写完一批（见 markCaseMapped）。
+-->
+<mapper namespace="com.aittest.execution.mapper.ExecutionResultMapper">
+
+    <!-- 批量插入明细：一条语句写完一批（调用方按 500 条切） -->
+    <insert id="insertBatch">
+        INSERT INTO execution_result
+            (id, run_id, class_name, case_name, status, duration_ms,
+             failure_message, stack_trace, case_id, failure_category, triage_source)
+        VALUES
+        <foreach collection="list" item="r" separator=",">
+            (#{r.id}, #{r.runId}, #{r.className}, #{r.caseName}, #{r.status}, #{r.durationMs},
+             #{r.failureMessage}, #{r.stackTrace}, #{r.caseId}, #{r.failureCategory}, #{r.triageSource})
+        </foreach>
+    </insert>
+
+    <!-- 回填 case_id：一条 UPDATE 写一批（CASE 分支由调用方按「未命中项已剔除」构造）。
+         带 run_id 条件：让更新走 idx_execution_result_run_status 前缀，
+         同时挡住"传了不属于本批次的 id"这种编程错误（更新 0 行，而不是改别人的数据）。 -->
+    <update id="markCaseMapped">
+        UPDATE execution_result
+           SET case_id = CASE id
+        <foreach collection="pairs" item="p">
+            WHEN #{p.resultId} THEN #{p.caseId}
+        </foreach>
+                          END
+         WHERE run_id = #{runId}
+           AND id IN
+        <foreach collection="pairs" item="p" open="(" separator="," close=")">
+            #{p.resultId}
+        </foreach>
+    </update>
+
+    <!-- 清掉一批明细的 case_id（重跑映射=重算，不是补漏；旧编号必须能被清走，
+         否则重导出换号之后旧 case_id 还在，映射指向一条根本没跑过的用例）。 -->
+    <update id="clearCaseMapped">
+        UPDATE execution_result
+           SET case_id = NULL
+         WHERE run_id = #{runId}
+           AND case_id IS NOT NULL
+           AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 规则归因落库：按分类分组、一条语句写一批（5000 条失败结果 → 最多 6 条 UPDATE）。
+         triage_source &lt;&gt; 'MANUAL'：人工结论不被机器覆盖，这条规则写在 SQL 里，
+         不依赖调用方记得判断。 -->
+    <update id="markFailureCategory">
+        UPDATE execution_result
+           SET failure_category = #{category},
+               triage_source = 'RULE'
+         WHERE run_id = #{runId}
+           AND triage_source &lt;&gt; 'MANUAL'
+           AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 失败分类分布：真实聚合（不是硬编码空数组）。
+         归因落库后这里自动有数据；LEFT JOIN 字典只为拿 label，字典里查不到时回落到码值，
+         不隐藏数据（停用某个分类后历史批次仍能看到当时的分布）。 -->
+    <select id="selectCategoryDistribution" resultType="java.util.LinkedHashMap">
+        SELECT r.failure_category          AS category,
+               COALESCE(c.label, r.failure_category) AS label,
+               COUNT(*)                    AS cnt
+          FROM execution_result r
+          LEFT JOIN failure_category c ON c.code = r.failure_category
+         WHERE r.run_id = #{runId}
+           AND r.failure_category IS NOT NULL
+         GROUP BY r.failure_category, c.label
+         ORDER BY cnt DESC, r.failure_category ASC
+    </select>
+
+</mapper>

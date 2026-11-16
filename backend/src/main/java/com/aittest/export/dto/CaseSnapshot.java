@@ -31,8 +31,25 @@ public class CaseSnapshot {
     /** 任务业务单号（与 {@code gen_task.task_no} 一致，用于文件名）。 */
     private String taskNo;
 
+    /**
+     * 任务主键（导出时用于把「第 N 行 → 用例」固化到 {@code test_case.junit_ref}）。
+     *
+     * <p>本对象同时服务 Excel 与 JUnit 两个导出；Excel 不需要它，但没有更好的挂载点——
+     * 为 JunitRefWriter 单独再查一次任务属于「同一事实查两遍」，两次查询之间任务被删就会对不上。</p>
+     */
+    private Long taskId;
+
     /** 本批导出的用例行（顺序稳定，供 JUnit 的 {@code case_NNN} 编号）。 */
     private List<CaseRow> rows;
+
+    /**
+     * 本批导出行的用例主键，与 {@link #rows} <b>同序同长</b>。
+     *
+     * <p><b>为什么不往 {@link CaseRow} 里加 id</b>：{@code CaseRow} 是 Excel 与 JUnit 共用的
+     * 导出列模型，刻意只装「要写进交付物」的字段（不带 id / contentHash / updatedAt）。
+     * 把内部主键塞进去，等于让交付物结构随内部实现漂移。</p>
+     */
+    private List<Long> caseIds;
 
     /** 四值状态分布（含值为 0 的状态）。 */
     private Map<String, Integer> statusCounts;

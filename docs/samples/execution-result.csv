@@ -1,0 +1,6 @@
+﻿class_name,case_name,status,duration_ms,failure_message,stack_trace
+com.aittest.generated.GeneratedCase_001,case_001,PASSED,120,,
+com.aittest.generated.GeneratedCase_002,case_002,PASSED,95,,
+com.aittest.generated.GeneratedCase_003,case_003,FAILED,340,"断言失败：期望状态码 200，实际 400",java.lang.AssertionError: 期望状态码 200，实际 400 at com.aittest.generated.GeneratedCase_003.case_003(GeneratedCase_003.java:24)
+com.aittest.generated.GeneratedCase_004,case_004,FAILED,5000,"连接失败，服务未启动",java.net.ConnectException: Connection refused: connect at java.base/java.net.PlainSocketImpl.socketConnect(Native Method)
+com.aittest.generated.GeneratedCase_005,case_005,SKIPPED,0,,

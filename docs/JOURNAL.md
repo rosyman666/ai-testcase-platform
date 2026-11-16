@@ -722,6 +722,65 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **示例文档已入库（`docs/samples/login-requirement.md`）**：按仓库既有规范放在 `docs/` 下作为素材，并在 README 的目录树、快速开始「用示例文档验证全链路」小节、文档索引三处登记——**目录树里出现的目录必须真实存在，存在的目录必须进目录树**，这条一直是本项目 README 的硬约束（否则新人按树找文件会踩空）。连带把「解析 17 章节 / 抽点 12 条 / 重复抽点 produced=0」三个可复核的数字写进 README，让「全链路正常」这件事有基线可比，而不是靠「看着像在跑」。
 - 其余遗留同上一节（`/testpoints` 真浏览器实测、`getParseStatusMeta` 未知码单测、`/metrics` 与导出弹窗眼验、T10 执行结果导入、D-54 / D-55）。
 
+## 2026-11-16 · 阶段 13 · T10 执行结果导入与归因（后端 + 前端）
+
+> 起点是一个决定：执行结果不该只被"统计"，还要能被"追问"——这条失败到底该谁修。
+> 于是 T10 从"把 JUnit/CSV 导进来算几个数"扩成了"导入 → 归因 → 人工纠正 → 重跑映射"的闭环。
+
+### 做了什么
+1. **`execution` 模块**：`parser/{JUnitXmlParser,CsvResultParser,FailureTypes}`、`service/{ExecutionImportService,ExecutionWriteService,ExecutionQueryService,ExecutionTriageService,FailureTriageRules,JunitRefLookup}`、`controller/ExecutionController`、`dto/*`、`mapper/*`。XML 用 StAX 流式 + 关 DTD/外部实体 + 剥 BOM；CSV 自实现 RFC4180 状态机。六个端点：#37 导入、#38 列表、#39 详情、#40 明细、#41 人工纠正、#42 重跑映射。
+2. **两阶段归因 `FailureTriageRules`**（纯函数、不碰库、不依赖 Spring，13 例单测）：阶段一按异常类、阶段二才看关键词；两个反例写进类注释作为"这层设计存在的理由"。
+3. **`FailureTypes` 把 FQCN 固化进 `stack_trace` 首行**（不新增迁移，幂等）：归因因此只有一个来源，不依赖"解析中间态被正确传到写侧"。
+4. **批量归因**：按分类分组、500 切片，5000 条失败最多 6 条 UPDATE；`triage_source <> 'MANUAL'` 写在 SQL 里。
+5. **`V7__execution_task_ref.sql` + `JunitRefWriter`**：`test_case.junit_ref`（导出那一刻固化行号→用例）、`execution_run.task_id`（FK `ON DELETE SET NULL`）。
+6. **前端两页**：`pages/execution/*`、`api/execution.ts`、`types/execution.ts`、路由与导航第 8 项；`FailurePie` 是仓库第一个 recharts 饼图，仍只在页面级懒加载组件里 import。
+7. **`docs/samples/` 两个样例**（XML 8 条 = 4/3/1、CSV 5 条且故意不带 `failure_type` 列），并让 `ExecutionTriageAcceptanceTest` 直接读它们验收。
+8. **文档**：`docs/01` 新增 `D-59`~`D-63` 五条偏差（58 → 63）、§11 汇总与 §6 T10 行同步；`CHANGELOG` 的 Added / Changed / Fixed 三节各补。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 归因**分两阶段**（异常类优先于文案），不是"所有信号混在一起打分" | 一条 `AssertionError` 的 message 里完全可能写着 "connection timed out"（被测的正是超时接口）。混匹配会把它判成 TIMEOUT/ENV，把人带去看环境和超时配置，而真实原因是断言写错——**方向错了比不归因更贵，因为它看起来很有结论** | 关键词统一打分：实现更短，但两个信号冲突时无法解释"为什么判成这个" |
+| `java.net.SocketTimeoutException` → **ENV**，`java.util.concurrent.TimeoutException` → **TIMEOUT** | 名字里都有 Timeout，语义完全不同：前者要去看网络与下游，后者要去看用例超时阈值。按子串匹配会把两类永久混在一起，且**永远不会有人发现**——两类都叫"超时" | 按 "Timeout" 子串统一归 TIMEOUT：省一张表，制造一个永久错误分类 |
+| 导出时**固化**行号→用例到 `junit_ref`，不在导入时重算 | `JUnitNaming.simpleClassName(seq)` 的 `seq` 是"查询结果第 N 行"；导出之后用例被新增或评审改状态，下次导出行号整体错位，而重算行号时**映射率仍显示 100%**。固化的代价是重新导出后旧 zip 导入会映射率归零——**可见失败换掉不可见错位**，这笔买卖永远划算 | 导入时按当前查询顺序重算：零 schema 改动，但错位是静默的，用户会拿一份"全部映射成功"的报告去追一个不存在的缺陷 |
+| **先 `write(zip)` 后 `persist(junit_ref)`** | 反序时 write 失败会留下"库里编号已更新、用户没拿到 zip"，用户拿旧 zip 导入即静默错位；正序失败则是映射率 0，**可见** | 先 persist 再 write：失败时同样只是"重试一次"，但失败形态从"可见"变成"静默" |
+| `execution_run.task_id` 用 **`ON DELETE SET NULL`** 而非 `CASCADE` | 执行结果是外部跑出来的事实、不属于任务；删任务不该抹掉执行历史（与 `execution_result.case_id` 同口径） | `CASCADE`：删任务连带删掉执行历史，等于让"任务"这个可丢弃的配置对象去决定"证据"的存亡 |
+| `remap` 是**重算**而不是补漏（命中不了的 `case_id` 被清空） | 只补不清的话，用例重新导出换号后旧 `case_id` 会永远指向一条没跑过的用例，而 `mapped_count` 还会变小，**看起来像"修好了"** | 只补不清：少一条 UPDATE，换来一个只在换号后才发作的静默错位 |
+| `triageSource` 在 **VO 层**归一成 null（非 FAILED 行），DB 不动 | 库里 `triage_source` 是 `NOT NULL DEFAULT 'RULE'`、`insertBatch` 每行都绑值，所以通过行也是 `'RULE'`。原样透出会让详情弹窗渲染成「归因：未归因（规则）」——同一行两句话互相打脸；且按 `triage_source='RULE'` 统计"归因覆盖率"会把通过行算进去。改 DB 会连带拆掉 `markFailureCategory` 的 `<> 'MANUAL'` 守卫 | 改 DB 值或让列可空：动存量数据 + 影响守卫；改前端不显示：接口对外仍然在撒谎 |
+| `PageResult.total` 在**后端**改成 JSON number，不从前端修 | `total` 是计数不是标识；`ToStringSerializer` 要防的是 Snowflake ID 超出 `Number.MAX_SAFE_INTEGER`，计数永远到不了 2^53。前端改（`Number()` 包一层或把共享类型改成 `string`）等于把错误固化进类型 | 拦截器里按形状猜并归一：把契约缺陷变成一层魔法；改共享类型 + 5 个页面补 `Number()`：把"declaration 该是 number"这件事彻底放弃 |
+| 人工纠正后**按当前筛选决定**要不要重拉明细 | 筛选是「全部」或新分类仍符合筛选 → 重拉只会平白打乱滚动位置与页码；不再符合 → 必须重拉，否则列表留下一份"自称按断言失败筛选、却躺着一条环境问题"的假结果 | 一律重拉：简单，但每次纠正都跳回第一页；一律不重拉：留下自相矛盾的列表 |
+
+### 踩坑记录
+- **`NumberSerializers.LongSerializer` 没有无参构造**：`@JsonSerialize(using = ...)` 经 `ClassUtil.createInstance` 实例化，只认无参构造，直接抛 `InvalidDefinitionException`。**编译期不报、大部分单测也不碰分页出参的序列化**，只有真正返回一个 `PageResult` 时才炸——这正是"必须有一条真序列化的测试"的理由。改为 `PageResult` 内嵌 `LongNumberSerializer extends JsonSerializer<Number>`。
+- **枚举简单类名撞 MyBatis 别名**（`D-63`）：新增的 `common.enums.FailureCategory` 与既有的 `system.domain.FailureCategory`（字典实体）同名，MyBatis-Plus 按基础包下类型的**简单类名**注册别名，服务启动即 `The alias 'FailureCategory' is already mapped to ...`。**编译通过、325 条单测全绿**，只有真起 Spring 上下文才炸。改名 `FailureCategoryCode` 后对全基础包扫描：202 个主源码文件 0 处重名。
+- **「跑过单测」不等于「起得来」**：`mvn test` 只加载它需要的上下文，别名冲突、Bean 装配、SQL 映射这类问题它一律看不见。本项目的验收口径因此定为四层：`tsc` 管类型、`mvn test` 管逻辑、**起一次容器管装配**、**真打一次 HTTP 管契约**，四者互不替代。
+- **`insertBatch` 显式绑 `triage_source`，不走列默认值**：所以"DB 里通过行也是 `'RULE'`"不是 DDL 的锅，是插入语句的锅。查这类问题要同时看 DDL 与写侧语句，只看 DDL 会得出"是默认值填的"这个错误结论，进而去改默认值——改不动问题还扩大了范围。
+- **`mvn package` 的 `Unable to rename ... .jar.original`**：8080 上还跑着旧进程，Windows 把 jar 映射成可执行镜像、禁止 rename。**坑在于中间态**：`maven-jar-plugin` 的覆盖写是成功的，于是 target 下留下一个没有 `BOOT-INF` 的 thin jar——文件在、大小变了、`java -jar` 报 "no main manifest attribute"，报错指向"jar 损坏"而不是"打包没做完"。遇到 rename 失败先查端口占用。
+- **`nohup ... &` 起的服务会随 shell 退出被带走**：本轮起 18080 时用 `nohup` 后台启动，命令返回后进程即消失（`netstat` 只剩 TIME_WAIT），表现为"刚还能 curl、下一分钟就 connection refused"。改由受管后台任务启动后才稳定。
+- **`npx vitest` 会卡住而 `./node_modules/.bin/vitest` 不会**：同一份代码、同样两个 flag，`npx` 包装层跑了 4 分半没产出任何输出（日志 0 字节），直接调本地二进制 10.88s 跑完。**排障时先怀疑包装层，别先怀疑测试**——否则会去查"哪个用例 hang 住了"，而用例根本没开始跑。
+- **一条 `PASSED` 行归因展示的用例曾是假绿**：夹具用 `triageSource: null`（归一之后的值），而当时后端根本不这么返，于是把 `status` 闸门整段删掉照样绿——`null` 走哪条分支都渲染「—」。夹具改成真实值 `'RULE'` 后变异立刻红。**夹具用哪种值，决定了测试是在验证行为还是在验证作者的想象。**最终两条夹具各锁一半：`'RULE'` 锁 `status` 闸门，`null` 锁真实返回形态。
+- **同一错误两套说法会被当成两个原因**：0 字节文件在后端返 `44002`、前端又有一层本地拦截，两处文案一度不同，且 `ExecutionImportDialog` 的注释里还引用着后端的**旧**文案。一个错误有了三套表述（UI / 后端 / 注释），排查时会被读成三个不同故障。最终三处逐字统一。
+- **"没人读这个字段"不等于"这个类型可以说谎"**：`GenTaskItemVO.costMicro` 前端声明 `number`、后端 `long` 实际返回字符串，且当前零消费者。留着不改，下一个人照着类型写 `item.costMicro * 0.7` 就会得到 `NaN`，而代码看起来完全正确——**假类型的成本不由写它的人承担，由下一个读它的人承担**。
+
+### 验收事实（2026-11-16，18080 真服务真库）
+- **后端 `mvn test`**：**332 / 0 fail / 0 error / 7 skipped**（7 条是 `IdGenSeedingTest`，需真库、历来跳过）。
+- **前端**：`tsc --noEmit` 0 错；单 fork **17 files / 138 tests**（`./node_modules/.bin/vitest run --pool=forks --poolOptions.forks.singleFork=true`，10.88s）。
+- **分页 `total` 已是数字**：`{"records":[],"total":0,"page":1,"size":5,"hasNext":false,"totalPages":0}`。
+- **导入 `docs/samples/junit-result.xml`**：`total 8 / passed 4 / failed 3 / skipped 1 / mappedCount 8`；详情 `categoryDistribution = ASSERTION 1 / ENV 1 / TIMEOUT 1`、`statusCounts = 4/3/1`、`mappedRate 1.0000`、`durationMs "5297"`。
+- **`triageSource` 只在失败行**：8 行里 3 条 FAILED 是 `"RULE"`，4 PASSED + 1 SKIPPED 是 `null`。
+- **`PATCH` 纠错**：004 → `DATA`，返回整行、`triageSource=MANUAL`、`caseId` 为字符串；同值重放仍 200（幂等）。PATCH 一条 PASSED → `40001 只有失败的结果可以人工归因（本行状态：PASSED）`。
+- **`remap`**：`{mappedCount:8, totalCount:8, mappedRate:1.0000}`，之后分布变 `ASSERTION 1 / DATA 1 / ENV 1`——**人工归因没被机器冲掉**。
+- **`keyword`**：`20261108-000100`（任务号）→ 1、`R20261116`（批次号）→ 1、`联调`（名称）→ 1、`T99999999-999999` → 0。
+- **CSV 链路**（故意不带 `failure_type` 列）：`total 5 / 2 通过 / 2 失败 / 1 跳过`，分布 `ASSERTION 1 / ENV 1`——靠堆栈首行推断命中。
+- **0 字节文案**：`{"code":44002,"message":"文件内容为空（0 字节），通常是导出或下载没有完成，请重新导出后再上传"}`。
+- **清场**：`execution_run` 0 行、`execution_result` 0 行、`test_case.junit_ref` 全 NULL（只 `DELETE` / `UPDATE`，未动 schema 与 `flyway_schema_history`）。
+
+### 下一步
+- **`D-59` 的后续项**：「一个批次永远对应自己那份 zip」需要在 import 时把当时的 `junit_ref` 快照进 `execution_result`，本轮未做（当前语义是"最近一次导出"）。
+- **`junit_ref` 的提示语可再进一步**：重跑映射以库里当前编号为准这件事，是否要在确认框里明说"如果你重新导出过，旧结果文件会全部映射不上"，待用户眼验后定。
+- **`/executions` 的真浏览器量测**：本轮只做了 HTTP 级联调与 jsdom 测试，1280/1920 布局与饼图渲染未在真浏览器里量过。
+- 其余遗留同上一节（`/testpoints` 布局量测、`getParseStatusMeta` 未知码单测、`/metrics` 四 Tab 与导出弹窗眼验、`D-54` / `D-55`）。
+
 ---
 
 ## 模板（新增记录时复制）

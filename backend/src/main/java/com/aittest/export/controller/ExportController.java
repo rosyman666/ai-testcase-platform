@@ -7,6 +7,7 @@ import com.aittest.export.dto.ExportQuery;
 import com.aittest.export.service.CaseSnapshotBuilder;
 import com.aittest.export.service.ExcelExportService;
 import com.aittest.export.service.JUnitExportService;
+import com.aittest.export.service.JunitRefWriter;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -53,15 +54,18 @@ public class ExportController {
     private final CaseSnapshotBuilder snapshotBuilder;
     private final ExcelExportService excelExportService;
     private final JUnitExportService junitExportService;
+    private final JunitRefWriter junitRefWriter;
     private final ExportProperties exportProperties;
 
     public ExportController(CaseSnapshotBuilder snapshotBuilder,
                             ExcelExportService excelExportService,
                             JUnitExportService junitExportService,
+                            JunitRefWriter junitRefWriter,
                             ExportProperties exportProperties) {
         this.snapshotBuilder = snapshotBuilder;
         this.excelExportService = excelExportService;
         this.junitExportService = junitExportService;
+        this.junitRefWriter = junitRefWriter;
         this.exportProperties = exportProperties;
     }
 
@@ -85,6 +89,19 @@ public class ExportController {
      * {@code statuses} 与 #35 共用 {@link ExportQuery#normalizeStatuses()}，
      * 保证同一任务下两个文件的用例条数一致。</p>
      *
+     * <p><b>顺序是「先生成 zip，再把编号固化进库」——这是刻意的，不要对调。</b>
+     * 执行结果导入（T10）只拿到 {@code GeneratedCase_NNN}，靠
+     * {@link JunitRefWriter} 写进 {@code test_case.junit_ref} 的编号反查用例。
+     * 两种失败方向的安全性差别很大：</p>
+     * <ul>
+     *   <li><b>先 persist 后 write</b>：write 抛异常 → 库里编号已换成这一批，而用户没拿到 zip。
+     *       他若拿<b>之前</b>下载的旧 zip 去导入，旧 zip 的 {@code GeneratedCase_007} 会命中
+     *       <b>新编号</b>的第 7 条用例 —— 静默错位，正是 junit_ref 这个设计要防的事故；</li>
+     *   <li><b>先 write 后 persist</b>（当前实现）：persist 抛异常 → 用户拿到了 zip，但库里
+     *       编号是旧的/全 NULL，导入时映射率 0。这是<b>可见</b>失败，重新导出一次即修复。</li>
+     * </ul>
+     * <p>两害相权，选可见的那个。</p>
+     *
      * @param query taskId 必填；docId / statuses / packageName 可选
      * @return 二进制 zip
      */
@@ -97,6 +114,8 @@ public class ExportController {
         }
         CaseSnapshot snapshot = snapshotBuilder.build(query);
         byte[] body = junitExportService.write(snapshot, packageName);
+        // 先 write 后 persist：生成失败时库完全不动（理由见方法注释）
+        junitRefWriter.persist(snapshot);
         return binary(body, ZIP_MIME, filename(snapshot.getTaskNo(), "zip"));
     }
 

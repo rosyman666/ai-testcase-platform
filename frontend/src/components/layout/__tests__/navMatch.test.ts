@@ -14,7 +14,12 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
   it('列表页精确命中自身', () => {
     expect(matchNavItem('/docs')?.key).toBe('docs');
     expect(matchNavItem('/tasks')?.key).toBe('tasks');
+    expect(matchNavItem('/executions')?.key).toBe('executions');
     expect(matchNavItem('/metrics')?.key).toBe('metrics');
+  });
+
+  it('执行结果详情按前缀命中执行结果列表（T10-2）', () => {
+    expect(matchNavItem('/executions/123')?.key).toBe('executions');
   });
 
   it('详情页按前缀命中父级列表（/docs/123）', () => {
@@ -56,8 +61,10 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
     expect(NAV_ITEMS.filter((item) => item.exact === true)).toHaveLength(1);
   });
 
-  it('导航表恰好 7 项，覆盖 6 个业务模块 + 概览', () => {
-    expect(NAV_ITEMS).toHaveLength(7);
+  it('导航表恰好 8 项，覆盖 7 个业务模块 + 概览', () => {
+    // T10-2 起新增「执行结果」（executions），位置在用例评审之后、指标看板之前：
+    // 业务流程 用例评审 → 跑用例 → 回填执行结果 → 看指标
+    expect(NAV_ITEMS).toHaveLength(8);
     expect(NAV_ITEMS.map((item) => item.key)).toEqual([
       'overview',
       'docs',
@@ -65,6 +72,7 @@ describe('constants/nav — matchNavItem 路径匹配', () => {
       'prompts',
       'tasks',
       'cases',
+      'executions',
       'metrics',
     ]);
   });

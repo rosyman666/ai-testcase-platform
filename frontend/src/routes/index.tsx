@@ -11,7 +11,7 @@ import { useAuthStore } from '@/store/authStore';
  * 纪律：page 组件**不得自建** `<Routes>` / `createBrowserRouter`，新增页面只在这里加一条。
  * 理由：守卫、懒加载边界、404 兜底如果散落在页面里，会变成"某个页面忘了包守卫"的漏洞。
  *
- * 当前层级：`/login`（公开）→ `RequireAuth`（守卫）→ `AppShell`（布局壳）→ 10 条业务路由。
+ * 当前层级：`/login`（公开）→ `RequireAuth`（守卫）→ `AppShell`（布局壳）→ 12 条业务路由。
  * 业务路由的 path 与 element 一旦确定就不要在本层顺手改，加模块只在 AppShell 的 children 里追加。
  */
 
@@ -33,6 +33,9 @@ const TaskDetailPage = lazy(() => import('@/pages/tasks/TaskDetail'));
 const CaseBoardPage = lazy(() => import('@/pages/cases/CaseBoard'));
 // T09/T11：指标与成本看板（只追加，不动已有 7 条与兜底）
 const OverviewDashboardPage = lazy(() => import('@/pages/metrics/OverviewDashboard'));
+// T10-2：执行结果（批次列表 + 批次详情），导入弹窗挂在列表页里，不单独开路由
+const ExecutionListPage = lazy(() => import('@/pages/execution/ExecutionList'));
+const ExecutionDetailPage = lazy(() => import('@/pages/execution/ExecutionDetail'));
 
 /** PageBoundary 属性。 */
 interface PageBoundaryProps {
@@ -57,7 +60,7 @@ interface PageBoundaryProps {
  * 兜底高度必须**分两种场景**，不要统一成一个值：
  * - 壳外（`/login`，传 `fullScreen`）：用 `minHeight: 100vh`。登录页的父级是 body，
  *   没有别的容器撑高度，只有视口单位能拿到参照，不留满屏会让转圈贴在顶端；
- * - 壳内（其余 10 条）：用 `height: 100%`。`main` 是 `h-screen` flex 列里的
+ * - 壳内（其余 12 条）：用 `height: 100%`。`main` 是 `h-screen` flex 列里的
  *   `flex-1 + min-h-0`，高度已经确定，`100%` 能正确解析到它，转圈精确居中。
  *
  * 这里踩过两次，记下来免得再踩：
@@ -82,7 +85,7 @@ function PageBoundary({ children, fullScreen = false }: PageBoundaryProps): JSX.
             alignItems: 'center',
             justifyContent: 'center',
             // 壳外（/login）：按视口高度铺满，父级是 body，只有 100vh 能拿到参照。
-            // 壳内（其余 10 条）：用 100% 而不是 40vh——`main` 是 `h-screen` flex 列里的
+            // 壳内（其余 12 条）：用 100% 而不是 40vh——`main` 是 `h-screen` flex 列里的
             // `flex-1 + min-h-0`，有确定高度，100% 能解析到它；40vh 只有容器的一半多
             // （1280×800 下 320px vs 751px），转圈会明显偏上，虽然不再溢出但不居中。
             minHeight: fullScreen ? '100vh' : undefined,
@@ -211,6 +214,25 @@ export const router = createBrowserRouter([
             element: (
               <PageBoundary>
                 <CaseBoardPage />
+              </PageBoundary>
+            ),
+          },
+          {
+            // T10-2 执行结果批次列表：必须排在 `/executions/:id` 之前，
+            // 与 `/testpoints` → `/testpoints/:docId` 同一纪律（静态段先匹配）
+            path: '/executions',
+            element: (
+              <PageBoundary>
+                <ExecutionListPage />
+              </PageBoundary>
+            ),
+          },
+          {
+            // T10-2 执行结果批次详情：批次是独立业务对象，id 进路径而不是查询串
+            path: '/executions/:id',
+            element: (
+              <PageBoundary>
+                <ExecutionDetailPage />
               </PageBoundary>
             ),
           },

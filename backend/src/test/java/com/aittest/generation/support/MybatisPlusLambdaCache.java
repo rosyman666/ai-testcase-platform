@@ -1,7 +1,10 @@
 package com.aittest.generation.support;
 
+import com.aittest.execution.domain.ExecutionResult;
+import com.aittest.execution.domain.ExecutionRun;
 import com.aittest.generation.domain.GenTask;
 import com.aittest.generation.domain.GenTaskItem;
+import com.aittest.system.domain.FailureCategory;
 import com.aittest.testcase.domain.CaseReview;
 import com.aittest.testcase.domain.TestCase;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -31,35 +34,42 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
  */
 public final class MybatisPlusLambdaCache {
 
-    private static volatile boolean installed = false;
-
     private MybatisPlusLambdaCache() {
     }
 
     /**
      * 安装 {@link GenTask} / {@link GenTaskItem} / {@link TestCase} / {@link CaseReview}
-     * 的 TableInfo 与 lambda 列缓存。
+     * / {@link ExecutionRun} / {@link ExecutionResult} / {@link FailureCategory} 的
+     * TableInfo 与 lambda 列缓存。
      *
-     * <p>只注册这四个实体：本包与 {@code testcase} 包的单测里出现的 lambda wrapper
-     * 全部以它们为泛型，其余 mapper（TestPoint / DocSource / ExtractPlanner /
-     * RejectReason）都是 mock，不会触发真实的列解析。少注册实体也避免把无关实体的
-     * 注解约束带进单测。</p>
+     * <p>只注册真正会被 lambda wrapper 用到的实体：其余 mapper（TestPoint / DocSource /
+     * ExtractPlanner / RejectReason）都是 mock，不会触发真实的列解析。少注册实体也避免把
+     * 无关实体的注解约束带进单测。</p>
      *
      * <p><b>T08 追加后两个</b>：{@code CaseReviewService} 锁用例行用
      * {@code lambdaQuery().eq(TestCase::getId, ...).last("FOR UPDATE")}，批量评审用
      * {@code lambdaUpdate().eq(CaseReview...)} 之外的条件更新，两者都要解析 lambda 列名。</p>
+     *
+     * <p><b>T10 追加后三个</b>：{@code ExecutionQueryService} 的分页/明细/字典查询分别
+     * 用 {@code LambdaQueryWrapper<ExecutionRun>}、{@code <ExecutionResult>}、
+     * {@code <FailureCategory>}。</p>
+     *
+     * <p><b>为什么不再用"装过一次就 return"的开关</b>：那个开关让<b>注册内容依赖于测试类的
+     * 执行顺序</b>——先跑的类装完旧的三/四个实体就把 {@code installed} 置 true，后跑的类新增的
+     * 实体永远装不上，表现为"单独跑通过、全量跑 {@code can not find lambda cache}"。
+     * {@link #installEntity} 自身已按 {@code TableInfoHelper.getTableInfo == null} 去重，
+     * 因此每次全量走一遍是幂等且廉价的。</p>
      */
     public static synchronized void install() {
-        if (installed) {
-            return;
-        }
         MybatisConfiguration configuration = new MybatisConfiguration();
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, "");
         installEntity(assistant, GenTask.class);
         installEntity(assistant, GenTaskItem.class);
         installEntity(assistant, TestCase.class);
         installEntity(assistant, CaseReview.class);
-        installed = true;
+        installEntity(assistant, ExecutionRun.class);
+        installEntity(assistant, ExecutionResult.class);
+        installEntity(assistant, FailureCategory.class);
     }
 
     private static void installEntity(MapperBuilderAssistant assistant, Class<?> entityClass) {

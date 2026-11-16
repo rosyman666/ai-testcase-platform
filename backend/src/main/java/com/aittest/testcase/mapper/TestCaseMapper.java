@@ -3,6 +3,8 @@ package com.aittest.testcase.mapper;
 import com.aittest.testcase.domain.TestCase;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
@@ -87,4 +89,56 @@ public interface TestCaseMapper extends BaseMapper<TestCase> {
      * @return 素材（可能为空列表，不会为 {@code null}）
      */
     List<TestCase> selectFewShot(@Param("docId") Long docId, @Param("limit") int limit);
+
+    /**
+     * 清空某任务下所有用例的 {@code junit_ref}（JUnit 导出前调用）。
+     *
+     * <p><b>为什么必须清空而不是"覆盖本批的行"</b>：编号是「当次导出的第 N 行」，
+     * 两套编号互不相容。上一次导出留下了 {@code GeneratedCase_001..030}，这次只导出了 10 条，
+     * 若不清空，旧的 011~030 仍然在库里，导入时同一个 {@code GeneratedCase_015}
+     * 会命中一条**不在本次文件里**的用例，于是"命中"变成新的静默错误来源。</p>
+     *
+     * <p>只按 {@code task_id} 清，绝不按全表清：别的任务的编号与这次导出的行号无关，
+     * 清掉等于把别人刚导出的文件作废。</p>
+     *
+     * @param taskId 任务 ID
+     * @return 影响行数（清了多少条已有编号）
+     */
+    int clearJunitRef(@Param("taskId") Long taskId);
+
+    /**
+     * 批量写回 {@code junit_ref}（一条 {@code UPDATE ... SET col = CASE id WHEN ...} 写完一批）。
+     *
+     * <p><b>为什么用 CASE 而不是逐条 UPDATE</b>：一次导出 5000 条用例就是 5000 次往返，
+     * 每次都加一次行锁（与 {@code GenTaskItemMapper} 批量的动机相同）。调用方按 500 条一批切，
+     * 一条 SQL 更新 500 行。</p>
+     *
+     * <p>{@code CASE} 里没有 {@code ELSE}：{@code WHERE id IN (...)} 已限定只碰这批行，
+     * 而 {@code CASE} 分支与 {@code IN} 列表来自同一个集合，不存在落到 ELSE 的行。
+     * 若真的漏写了 {@code ELSE}，MySQL 会把不匹配的行置 NULL——反而回到"未导出"状态，
+     * 不会留下错误的编号（安全的失败方向）。</p>
+     *
+     * @param refs 用例 ID ↔ 类名序号 配对（非空）
+     * @return 影响行数
+     */
+    int markJunitRef(@Param("refs") List<JunitRef> refs);
+
+    /**
+     * {@code junit_ref} 写回的配对载体：一条用例一个类名序号。
+     *
+     * <p><b>为什么不建一个 DTO 类</b>：它只在本接口与 {@code JunitRefWriter} 之间传递，
+     * 出一个独立文件等于为一次 XML 绑定新增一个公共类型。MyBatis 通过 getter 读取，
+     * 因此这里是普通 JavaBean 而不是 record（record 没有 {@code getXxx()}，
+     * 依赖反射字段访问更脆）。</p>
+     */
+    @Getter
+    @AllArgsConstructor
+    class JunitRef {
+
+        /** 用例主键。 */
+        private final Long caseId;
+
+        /** 类名序号，形如 {@code GeneratedCase_001}。 */
+        private final String ref;
+    }
 }

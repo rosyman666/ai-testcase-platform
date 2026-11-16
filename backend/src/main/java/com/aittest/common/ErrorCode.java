@@ -73,6 +73,29 @@ public enum ErrorCode {
     /** 任务超 deadline。 */
     E_TASK_DEADLINE(43002, "任务已超时，请重新发起", HttpStatus.OK),
 
+    /**
+     * 执行结果文件解析失败（T10 导入）。
+     *
+     * <p><b>为什么不复用 {@code 40001 参数校验失败}</b>：{@code 40001} 由 Bean Validation
+     * 与 service 里的白名单校验共用，前端为它挂的是"字段级内联提示"。而这里失败的是
+     * <b>文件内容</b>（XML 语法错、CSV 某行 status 取值不合法），提示必须带行号/原因，
+     * 展示位置也不同（导入弹窗，不是表单字段）。混进 40001 会让 import 流程整片泛红却
+     * 指不出哪一行错了。</p>
+     *
+     * <p>文案里的行号由抛出方通过 {@code new BizException(E_RESULT_PARSE_FAILED, "…第 N 行…")}
+     * 覆盖，本码自身的默认文案只用于兜底。</p>
+     */
+    E_RESULT_PARSE_FAILED(44001, "执行结果文件解析失败", HttpStatus.OK),
+
+    /**
+     * 不支持的执行结果文件格式（T10 导入）。
+     *
+     * <p>与 {@code 42002 E_DOC_UNSUPPORTED}（文档上传）分开：两者虽然都是"格式/大小不对"，
+     * 但入口不同（一个是上传文档、一个是导入执行结果），前端把用户引到哪个页面操作
+     * 完全取决于码值；合并会让"请上传 pdf/docx"的文案出现在执行结果导入弹窗里。</p>
+     */
+    E_RESULT_UNSUPPORTED(44002, "不支持的执行结果文件格式，仅支持 JUnit XML 与 CSV", HttpStatus.OK),
+
     /** 上游 5xx / 网络错误（重试耗尽）。 */
     E_LLM_UPSTREAM(50001, "模型服务异常，请稍后重试", HttpStatus.OK),
 

@@ -1,6 +1,11 @@
 package com.aittest.common;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.JsonSerializer;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import lombok.Getter;
@@ -22,7 +27,24 @@ public class PageResult<T> {
     /** 当前页记录。 */
     private final List<T> records;
 
-    /** 总记录数。 */
+    /**
+     * 总记录数。
+     *
+     * <p><b>计数不是标识，序列化为 JSON number</b>（字段级 {@code @JsonSerialize} 覆盖
+     * {@code JacksonConfig} 里 {@code Long → String} 的全局规则）；同理 {@code totalPages} /
+     * {@code page} / {@code size} 都是 number，只有真正的 ID 才是 String。</p>
+     *
+     * <p>为什么必须显式覆盖：全局 {@code ToStringSerializer} 防的是<b>雪花 ID 超过
+     * JS {@code Number.MAX_SAFE_INTEGER} 后在浏览器里被静默改写</b>；行数永远到不了 2^53，
+     * 不属于该规则的保护对象。放任不管的后果是同一个分页体里
+     * {@code "total":"1"} 与 {@code "totalPages":1} 自相矛盾，而前端 TS 又声明
+     * {@code total: number}——类型在说谎、运行靠隐式转换（D-58 同族）。</p>
+     *
+     * <p>字段类型保持 {@code long} 而不是 {@code int}：{@link #of(IPage)} 那边要
+     * {@code (int) page.getTotal()} 强转，计数超过 21 亿时会静默截断。为一个不存在的问题
+     * 引入一个真实的截断点不值得。</p>
+     */
+    @JsonSerialize(using = LongNumberSerializer.class)
     private final long total;
 
     /** 当前页码（从 1 开始）。 */
@@ -93,5 +115,34 @@ public class PageResult<T> {
      */
     public boolean isHasNext() {
         return page < getTotalPages();
+    }
+
+    /**
+     * 把 {@code long} 写成 JSON <b>number</b> 的序列化器（字段级覆盖全局 {@code Long → String}）。
+     *
+     * <p><b>为什么不是 {@code NumberSerializers.LongSerializer}</b>：那个类<b>没有无参构造</b>
+     * （只有 {@code LongSerializer(Class<?>)} 等），而 {@code @JsonSerialize(using = ...)} 由
+     * Jackson 通过 {@code ClassUtil.createInstance} 实例化，只认无参构造。用它会在第一次
+     * 序列化时直接抛 {@code InvalidDefinition: LongSerializer has no default (no arg) constructor}
+     * ——而且这条错只在真正走到分页出参时才炸，编译期与普通单测都发现不了
+     * （{@code PageResultTest} 就是为这件事加的）。所以这里自己实现一个语义完全等价的：
+     * {@code generator.writeNumber(value.longValue())}。</p>
+     */
+    public static final class LongNumberSerializer extends JsonSerializer<Number> {
+
+        /** Jackson 要求序列化器可由无参构造实例化。 */
+        public LongNumberSerializer() {
+            // 无状态，无需初始化
+        }
+
+        @Override
+        public void serialize(Number value, JsonGenerator generator, SerializerProvider provider)
+                throws IOException {
+            if (value == null) {
+                generator.writeNull();
+                return;
+            }
+            generator.writeNumber(value.longValue());
+        }
     }
 }

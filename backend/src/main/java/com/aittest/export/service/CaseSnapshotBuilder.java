@@ -88,16 +88,20 @@ public class CaseSnapshotBuilder {
         }
 
         List<CaseRow> rows = new ArrayList<>(entities.size());
+        List<Long> caseIds = new ArrayList<>(entities.size());
         Map<String, Integer> statusCounts = emptyStatusCounts();
         for (TestCase entity : entities) {
             rows.add(toRow(entity));
+            caseIds.add(entity.getId());
             String status = entity.getStatus() == null ? "" : entity.getStatus();
             statusCounts.merge(status, 1, Integer::sum);
         }
 
         return CaseSnapshot.builder()
                 .taskNo(task.getTaskNo())
+                .taskId(taskId)
                 .rows(rows)
+                .caseIds(caseIds)
                 .statusCounts(statusCounts)
                 .exportedAt(LocalDateTime.now(ZoneOffset.UTC))
                 .criteria(query.criteria(statuses))

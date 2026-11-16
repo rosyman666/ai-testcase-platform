@@ -8,6 +8,7 @@ import com.aittest.common.enums.CaseStatus;
 import com.aittest.common.enums.CaseType;
 import com.aittest.common.enums.CodedEnum;
 import com.aittest.common.enums.DocType;
+import com.aittest.common.enums.ExecutionSourceType;
 import com.aittest.common.enums.ExecutionStatus;
 import com.aittest.common.enums.ParseStatus;
 import com.aittest.common.enums.RiskLevel;
@@ -108,6 +109,7 @@ public class DictService {
             case "risk-levels" -> ofEnum(RiskLevel.values());
             case "test-point-statuses" -> ofEnum(TestPointStatus.values());
             case "execution-statuses" -> ofEnum(ExecutionStatus.values());
+            case "execution-source-types" -> ofEnum(ExecutionSourceType.values());
             case "triage-sources" -> ofEnum(TriageSource.values());
             default -> throw new BizException(ErrorCode.E_PARAM_INVALID, "不支持的字典类型：" + type);
         };

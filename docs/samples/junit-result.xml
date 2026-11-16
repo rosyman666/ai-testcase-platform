@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  执行结果导入的人工验证样本（T10）：一个合法的 JUnit XML。
+
+  用途
+    1. 手工验证 POST /api/executions/import：上传本文件 + taskId，应得到
+       total=8 / passed=4 / failed=3 / skipped=1；
+    2. 验证「映射率可以小于 100%」：classname 只覆盖 GeneratedCase_001..008，
+       而任务下通常有更多用例（导出上限 5000），因此 mappedCount 会如实小于 total 的情况
+       在超过 8 条用例的任务上必然出现——这正是这个功能要暴露的东西，不是错误。
+
+  结构说明（故意做成 JUnit 真实产物的形态）
+    · 根节点 <testsuites> 下嵌**两个** <testsuite>：解析必须流式遍历所有 testcase，
+      不能只看第一个 suite（只看第一个会静默丢掉后 4 条，总数变成 4 而没有任何报错）；
+    · 8 条 testcase = 4 PASSED + 3 FAILED + 1 SKIPPED：
+        - GeneratedCase_003 <failure>：断言失败（message 进 failure_message，
+          元素文本进 stack_trace）；
+        - GeneratedCase_004 <error>：用例超时。error 与 failure 都算 FAILED——
+          "这条用例没通过"这个结论没有第三种口径；
+        - GeneratedCase_007 <failure>：连接失败（CI 环境没起服务时的典型输出）；
+        - GeneratedCase_008 <skipped>：环境未就绪，按配置跳过；
+    · 三条失败都带 type 属性（异常全限定名）：归因阶段一按异常类判定，
+      预期分布为 ASSERTION=1 / TIMEOUT=1 / ENV=1。type 缺失时归因会退到
+      "读 stack_trace 首行"，本样例的首行同样是 FQCN，两条路径都能走通；
+    · time 的单位是**秒**（double），导入时按 Math.round(秒 * 1000) 换成毫秒：
+      0.123 → 123ms。
+-->
+<testsuites name="ai-testcase-platform" tests="8" failures="3" errors="0" skipped="1" time="5.297">
+    <testsuite name="com.aittest.generated.GeneratedCase_001" tests="4" failures="1" errors="1"
+               skipped="0" time="5.236">
+        <testcase classname="com.aittest.generated.GeneratedCase_001" name="case_001" time="0.123"/>
+        <testcase classname="com.aittest.generated.GeneratedCase_002" name="case_002" time="0.456"/>
+        <testcase classname="com.aittest.generated.GeneratedCase_003" name="case_003" time="0.789">
+            <failure type="java.lang.AssertionError" message="断言失败：期望状态码 200，实际 400">
+java.lang.AssertionError: 期望状态码 200，实际 400
+	at org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:38)
+	at com.aittest.generated.GeneratedCase_003.case_003(GeneratedCase_003.java:24)
+            </failure>
+        </testcase>
+        <testcase classname="com.aittest.generated.GeneratedCase_004" name="case_004" time="3.868">
+            <error type="java.util.concurrent.TimeoutException" message="用例执行超时（30s）">
+java.util.concurrent.TimeoutException: 用例执行超过 30 秒
+	at com.aittest.generated.GeneratedCase_004.case_004(GeneratedCase_004.java:31)
+            </error>
+        </testcase>
+    </testsuite>
+    <testsuite name="com.aittest.generated.GeneratedCase_005" tests="4" failures="1" errors="0"
+               skipped="1" time="0.061">
+        <testcase classname="com.aittest.generated.GeneratedCase_005" name="case_005" time="0.010"/>
+        <testcase classname="com.aittest.generated.GeneratedCase_006" name="case_006" time="0.020"/>
+        <testcase classname="com.aittest.generated.GeneratedCase_007" name="case_007" time="0.031">
+            <failure type="java.net.ConnectException" message="连接失败：Connection refused">
+java.net.ConnectException: Connection refused: connect
+	at java.base/java.net.PlainSocketImpl.socketConnect(Native Method)
+	at com.aittest.generated.GeneratedCase_007.case_007(GeneratedCase_007.java:18)
+            </failure>
+        </testcase>
+        <testcase classname="com.aittest.generated.GeneratedCase_008" name="case_008" time="0.000">
+            <skipped message="环境未就绪，按配置跳过"/>
+        </testcase>
+    </testsuite>
+</testsuites>

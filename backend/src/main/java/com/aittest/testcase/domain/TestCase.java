@@ -104,6 +104,20 @@ public class TestCase {
     /** 内容哈希 {@code sha256(title \n steps \n expected)}，用于同一 item 内查重（{@code idx_test_case_content_hash}）。 */
     private String contentHash;
 
+    /**
+     * 最近一次 JUnit 导出分配的类名序号（形如 {@code GeneratedCase_001}），供执行结果导入反查。
+     *
+     * <p><b>为什么要在库里存一个"序号"</b>：JUnit 的类名恒为 {@code GeneratedCase_NNN}，
+     * NNN 是「当次导出的查询结果第 N 行」的产物。导入执行结果时若用同样的筛选条件重算行号，
+     * 只要两次之间新增了用例、有人评审改了状态、或删了文档关联，行号就会整体错位——
+     * 而且映射率仍是 100%，全错却全绿（见 {@code V7__execution_task_ref.sql} 的说明）。
+     * 所以导出那一刻就把编号固化在这里，导入时按 {@code (taskId, junitRef)} 精确匹配。</p>
+     *
+     * <p><b>语义是"最近一次导出"</b>，不是历史：{@code JunitRefWriter} 每次导出先清空本任务的
+     * 全部编号再重写（两套编号体系并存必然互相踩）。从未导出过的用例为 {@code null}。</p>
+     */
+    private String junitRef;
+
     /** 创建时间（UTC，由数据库默认值写入，应用侧<b>不填</b>）。 */
     private LocalDateTime createdAt;
 

@@ -58,7 +58,15 @@ export interface GenTaskItemVO {
   degraded: boolean;
   promptTokens: number;
   completionTokens: number;
-  costMicro: number;
+  /**
+   * 累计成本（微元，1 元 = 1_000_000）。
+   *
+   * **JSON 里是字符串**：后端 `long costMicro` 被全局 `ToStringSerializer` 输出成 `"1234"`。
+   * 本字段目前**没有任何消费者**（任务页从未渲染它；指标页用的是 `types/metrics.ts` 里
+   * 另一份已声明为 string 的类型）。将来要展示时请先 `Number(...)` 再参与格式化或算术，
+   * 别直接 `+`——字符串相加会把两笔成本拼成 `"1234""5678"`。
+   */
+  costMicro: string;
   latencyMs: number;
   errorCode: string;
   errorMsg: string;

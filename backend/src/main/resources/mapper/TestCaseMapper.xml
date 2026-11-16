@@ -76,4 +76,31 @@
          LIMIT #{limit}
     </select>
 
+    <!-- 清空本任务的 junit_ref（JUnit 导出前调用）。
+         必须清空：上一次导出的编号与这一次的第 N 行是两套互不相容的编号体系，
+         并存会让同一个 GeneratedCase_015 同时指向两条用例，导入时"命中"变成新的静默错误。
+         只按 task_id 清：别的任务的编号与这次导出的行号无关。 -->
+    <update id="clearJunitRef">
+        UPDATE test_case
+           SET junit_ref = NULL
+         WHERE task_id = #{taskId}
+           AND junit_ref IS NOT NULL
+    </update>
+
+    <!-- 批量写回 junit_ref：一条语句更新一批（500 条一批由调用方切）。
+         CASE 分支与 IN 列表来自同一个集合，故不写 ELSE；万一不一致，
+         未命中的行会被置 NULL（回到"未导出"状态），这是安全的失败方向。 -->
+    <update id="markJunitRef">
+        UPDATE test_case
+           SET junit_ref = CASE id
+        <foreach collection="refs" item="r">
+            WHEN #{r.caseId} THEN #{r.ref}
+        </foreach>
+                           END
+         WHERE id IN
+        <foreach collection="refs" item="r" open="(" separator="," close=")">
+            #{r.caseId}
+        </foreach>
+    </update>
+
 </mapper>

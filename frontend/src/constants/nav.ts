@@ -13,6 +13,7 @@ import DescriptionRounded from '@mui/icons-material/DescriptionRounded';
 import FactCheckRounded from '@mui/icons-material/FactCheckRounded';
 import InsightsRounded from '@mui/icons-material/InsightsRounded';
 import PlayCircleOutlineRounded from '@mui/icons-material/PlayCircleOutlineRounded';
+import PlaylistAddCheckRounded from '@mui/icons-material/PlaylistAddCheckRounded';
 import SpaceDashboardRounded from '@mui/icons-material/SpaceDashboardRounded';
 import TuneRounded from '@mui/icons-material/TuneRounded';
 
@@ -55,6 +56,10 @@ export const NAV_ITEMS: NavItem[] = [
   { key: 'prompts', label: '提示词模板', path: '/prompts', icon: TuneRounded },
   { key: 'tasks', label: '生成任务', path: '/tasks', icon: PlayCircleOutlineRounded },
   { key: 'cases', label: '用例评审', path: '/cases', icon: FactCheckRounded },
+  // 执行结果放在「用例评审」之后、「指标看板」之前：业务流程是
+  // 用例评审 → 把用例跑起来 → 回填执行结果 → 看指标。指标页的通过率 / 失败分布
+  // 全靠这一步的导入数据，放在它前面等于让人先看结果再问数据哪来
+  { key: 'executions', label: '执行结果', path: '/executions', icon: PlaylistAddCheckRounded },
   { key: 'metrics', label: '指标看板', path: '/metrics', icon: InsightsRounded },
 ];
 

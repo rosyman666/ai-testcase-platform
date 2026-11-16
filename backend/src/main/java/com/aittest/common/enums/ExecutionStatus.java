@@ -13,8 +13,15 @@ public enum ExecutionStatus implements CodedEnum {
     /** 失败。 */
     FAILED("FAILED", "失败", 20),
 
-    /** 跳过。 */
-    SKIPPED("SKIPPED", "跳过", 30);
+    /**
+     * 跳过。
+     *
+     * <p>文案是「已跳过」而不是「跳过」：前端 {@code constants/status.ts} 的
+     * {@code EXECUTION_STATUS} 与 item 明细里的 {@code SKIPPED} 都写「已跳过」，
+     * 而执行结果详情页的状态分布直接渲染后端给的 {@code label}。两处不一致时，
+     * 同一个 SKIPPED 会在饼图与列表徽标里显示成两个不同的词。</p>
+     */
+    SKIPPED("SKIPPED", "已跳过", 30);
 
     private final String code;
 

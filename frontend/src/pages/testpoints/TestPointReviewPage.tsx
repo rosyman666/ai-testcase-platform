@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
@@ -12,6 +12,7 @@ import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
+import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
@@ -32,11 +33,12 @@ import {
   updateTestPoint,
 } from '@/api/testpoint';
 import type {
-  TestPointExtractReport,
+  TestPointExtractAck,
   TestPointListQuery,
   TestPointUpdateReq,
   TestPointVO,
 } from '@/types/testpoint';
+import { useTaskStream } from '@/hooks/useTaskStream';
 import { toast } from '@/utils/toast';
 
 /** 状态的中文与配色（后端编码是唯一真源，这里只做展示映射）。 */
@@ -88,7 +90,12 @@ export default function TestPointReviewPage(): JSX.Element {
   const [editForm, setEditForm] = useState<TestPointUpdateReq>({});
   const [creating, setCreating] = useState(false);
   const [createForm, setCreateForm] = useState({ title: '', category: 'FUNCTIONAL', riskLevel: 'MEDIUM', description: '' });
-  const [report, setReport] = useState<TestPointExtractReport | null>(null);
+  // 抽取自 T06 起是异步任务：这里只存受理回执（taskId + taskNo），进度与终态由
+  // useTaskStream 推过来。原先这里存的是同步报告（unitCount/results[]），后端改异步后
+  // 再也拿不到那个结构，页面却仍按它渲染，于是「一点抽取就整页崩」。
+  const [extractTask, setExtractTask] = useState<TestPointExtractAck | null>(null);
+  // 已弹过「抽取完成」toast 的 taskId（effect 双跑/重复触发时不再重复提示）
+  const notifiedTaskRef = useRef<string | null>(null);
 
   const query: TestPointListQuery = useMemo(
     () => ({ docId, status: statusFilter, page: page + 1, size }),
@@ -103,12 +110,44 @@ export default function TestPointReviewPage(): JSX.Element {
 
   const extractMutation = useMutation({
     mutationFn: () => extractTestPoints(docId),
-    onSuccess: (data) => {
-      setReport(data);
-      void queryClient.invalidateQueries({ queryKey: ['testpoints'] });
+    onSuccess: (ack: TestPointExtractAck) => {
+      // 拿到 taskId 只代表「任务已受理」，抽取还在后台跑；这一步不能 invalidate 列表
+      // —— 那时候库里还没有新点，刷了也是空的，用户会以为抽取没生效
+      setExtractTask(ack);
+      toast(`已提交抽取任务 ${ack.taskNo}`, 'success');
     },
-    onError: () => toast('抽取失败，请查看服务端日志', 'error'),
+    onError: () => toast('提交抽取任务失败，请查看服务端日志', 'error'),
   });
+
+  const extractStream = useTaskStream(extractTask?.taskId);
+
+  /**
+   * 抽取任务到终态后刷新列表。
+   *
+   * 用 ref 去重：`terminal` 变 true 后本 effect 的依赖仍可能因快照字段变化再触发一次，
+   * StrictMode 下还会双跑——不去重就是两条一样的 toast。
+   */
+  useEffect(() => {
+    if (!extractTask || !extractStream.terminal) return;
+    if (notifiedTaskRef.current === extractTask.taskId) return;
+    notifiedTaskRef.current = extractTask.taskId;
+
+    void queryClient.invalidateQueries({ queryKey: ['testpoints'] });
+
+    const failed = extractStream.snapshot?.failed ?? 0;
+    const produced = extractStream.snapshot?.produced ?? 0;
+    if (failed > 0) {
+      toast(`抽取结束：新增 ${produced} 条，${failed} 个单元失败`, 'warning');
+    } else {
+      toast(`抽取完成：新增 ${produced} 条`, 'success');
+    }
+  }, [
+    extractTask,
+    extractStream.terminal,
+    extractStream.snapshot?.failed,
+    extractStream.snapshot?.produced,
+    queryClient,
+  ]);
 
   const updateMutation = useMutation({
     mutationFn: ({ id, req }: { id: string; req: TestPointUpdateReq }) => updateTestPoint(id, req),
@@ -148,6 +187,10 @@ export default function TestPointReviewPage(): JSX.Element {
   const rows = listQuery.data?.records ?? [];
   const allChecked = rows.length > 0 && rows.every((r) => selected.includes(r.id));
 
+  // 抽取任务仍在跑：按钮要禁用，否则重复点击会重复建任务（后端每次都会新建一个）
+  const extractRunning = extractTask !== null && !extractStream.terminal;
+  const snap = extractStream.snapshot;
+
   return (
     <Container maxWidth="lg" className="py-8">
       <Stack direction="row" alignItems="center" justifyContent="space-between" className="mb-2">
@@ -168,17 +211,19 @@ export default function TestPointReviewPage(): JSX.Element {
           </Button>
           <Button
             variant="contained"
-            disabled={extractMutation.isPending || !docId}
+            disabled={!docId || extractMutation.isPending || extractRunning}
             onClick={() => extractMutation.mutate()}
           >
-            {extractMutation.isPending ? '抽取中…' : '开始抽取'}
+            {extractMutation.isPending ? '提交中…' : extractRunning ? '抽取中…' : '开始抽取'}
           </Button>
         </Stack>
       </Stack>
 
-      {extractMutation.isPending && (
+      {extractRunning && (
         <Alert severity="info" className="mb-4">
-          正在按「一个接口/章节一次调用」逐个抽取，篇幅长会耗时较久。T06 起改为异步任务 + 进度推送。
+          抽取任务进行中：已完成 {snap?.done ?? 0} / 共 {snap?.total ?? 0} 个单元
+          {snap && snap.produced > 0 ? `，已新增 ${snap.produced} 条` : ''}。
+          完成后列表会自动刷新，逐单元明细可去「任务详情」看。
         </Alert>
       )}
 
@@ -346,74 +391,51 @@ export default function TestPointReviewPage(): JSX.Element {
         )}
       </Paper>
 
-      {/* 抽取报告 */}
-      <Dialog open={report !== null} onClose={() => setReport(null)} maxWidth="sm" fullWidth>
-        <DialogTitle>抽取完成</DialogTitle>
+      {/* 抽取任务进度：异步任务的进度来自 SSE，不再有同步的「抽取报告」 */}
+      <Dialog open={extractTask !== null} onClose={() => setExtractTask(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>{extractStream.terminal ? '抽取结束' : '抽取进行中'}</DialogTitle>
         <DialogContent>
-          {report && (
-            <>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap className="mb-3">
-                <Chip size="small" label={`单元 ${report.unitCount}`} />
-                <Chip size="small" color="success" label={`成功 ${report.successCount}`} />
-                <Chip
-                  size="small"
-                  color={report.failedCount > 0 ? 'error' : 'default'}
-                  label={`失败 ${report.failedCount}`}
-                />
-                <Chip size="small" label={`模型返回 ${report.parsedCount}`} />
-                <Chip size="small" color="primary" label={`新增 ${report.insertedCount}`} />
-              </Stack>
-              {report.failedCount > 0 && (
-                <Alert severity="warning" className="mb-2">
-                  有 {report.failedCount} 个单元抽取失败，其余已正常入库。失败明细见下。
-                </Alert>
-              )}
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>来源</TableCell>
-                    <TableCell width={70}>结果</TableCell>
-                    <TableCell width={70}>新增</TableCell>
-                    <TableCell width={130}>质量信号</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {report.results.map((r) => (
-                    <TableRow key={r.sourceRef}>
-                      <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{r.sourceRef}</TableCell>
-                      <TableCell>
-                        {r.success ? (
-                          <Chip size="small" color="success" label="成功" />
-                        ) : (
-                          <Chip size="small" color="error" label="失败" />
-                        )}
-                      </TableCell>
-                      <TableCell>{r.insertedCount}</TableCell>
-                      <TableCell>
-                        {r.repaired && (
-                          <Chip size="small" color="warning" label="修复过" sx={{ mr: 0.5 }} />
-                        )}
-                        {r.truncated && <Chip size="small" color="warning" label="截断" />}
-                        {!r.repaired && !r.truncated && r.success && (
-                          <Typography variant="caption" color="text.secondary">
-                            干净
-                          </Typography>
-                        )}
-                        {r.error && (
-                          <Typography variant="caption" color="error" display="block">
-                            {r.error}
-                          </Typography>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </>
-          )}
+          <Stack spacing={2}>
+            <Typography variant="body2" color="text.secondary">
+              任务号 {extractTask?.taskNo ?? '—'}　·　状态 {snap?.status ?? '连接中…'}
+            </Typography>
+
+            <LinearProgress
+              variant={snap !== null && snap.total > 0 ? 'determinate' : 'indeterminate'}
+              value={snap !== null && snap.total > 0 ? Math.round((snap.done / snap.total) * 100) : undefined}
+            />
+
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Chip size="small" label={`单元 ${snap?.done ?? 0}/${snap?.total ?? 0}`} />
+              <Chip size="small" color="success" label={`成功 ${snap?.success ?? 0}`} />
+              <Chip
+                size="small"
+                color={(snap?.failed ?? 0) > 0 ? 'error' : 'default'}
+                label={`失败 ${snap?.failed ?? 0}`}
+              />
+              <Chip size="small" color="primary" label={`新增 ${snap?.produced ?? 0}`} />
+            </Stack>
+
+            {(snap?.failed ?? 0) > 0 && (
+              <Alert severity="warning">
+                有 {snap?.failed} 个单元抽取失败，其余已正常入库。失败原因与逐单元明细请到「任务详情」查看。
+              </Alert>
+            )}
+
+            {extractStream.errorFrame !== null && (
+              <Alert severity="error">进度订阅失败：{extractStream.errorFrame.message}</Alert>
+            )}
+
+            {extractStream.terminal && (snap?.failed ?? 0) === 0 && (
+              <Alert severity="success">抽取完成，列表已刷新。</Alert>
+            )}
+          </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setReport(null)}>知道了</Button>
+          <Button onClick={() => navigate(`/tasks/${extractTask?.taskId ?? ''}`)}>查看任务详情</Button>
+          <Button variant="contained" onClick={() => setExtractTask(null)}>
+            {extractStream.terminal ? '知道了' : '后台运行'}
+          </Button>
         </DialogActions>
       </Dialog>
 

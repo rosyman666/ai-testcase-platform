@@ -3,7 +3,7 @@ import type { PageResult } from '@/types/common';
 import type {
   BatchStatusReq,
   TestPointCreateReq,
-  TestPointExtractReport,
+  TestPointExtractAck,
   TestPointListQuery,
   TestPointUpdateReq,
   TestPointVO,
@@ -19,15 +19,19 @@ import type {
 /**
  * 触发抽取。
  *
- * **T05 阶段是同步的**：请求会一直等到抽取完成才返回报告（§11.1 D-26）。
- * 用 mock provider 时是秒级；接真实模型后一篇几十接口的文档会跑几分钟，
- * 网关可能先超时——那正是 T06 异步引擎要解决的问题，不要在这里加"客户端轮询"绕过去。
+ * **自 T06 起是异步的**：只立即返回 `{taskId, taskNo}`，抽取在后台任务里执行，
+ * 进度经 `GET /api/tasks/{taskId}/stream` 订阅（`useTaskStream`）。
+ *
+ * **不要期待这里有抽取结果**：T05 时代它同步返回 `TestPointExtractReport`
+ * （含 `unitCount` / `results[]`），那是后端改异步后**再也不会出现**的结构。
+ * 曾经因为页面还按旧结构渲染而整页崩过一次（`undefined.map`）——见
+ * `types/testpoint.ts` 的 `TestPointExtractAck` 注释。
  *
  * @param docId 文档 ID
- * @returns 抽取汇总报告
+ * @returns 任务受理回执
  */
-export function extractTestPoints(docId: string): Promise<TestPointExtractReport> {
-  return post<TestPointExtractReport>(`/testpoints/extract?docId=${encodeURIComponent(docId)}`);
+export function extractTestPoints(docId: string): Promise<TestPointExtractAck> {
+  return post<TestPointExtractAck>(`/testpoints/extract?docId=${encodeURIComponent(docId)}`);
 }
 
 /**

@@ -77,31 +77,20 @@ export interface BatchStatusReq {
   status: string;
 }
 
-/** 一个待分析单元的抽取结果。 */
-export interface TestPointExtractResult {
-  sourceRef: string;
-  success: boolean;
-  parsedCount: number;
-  insertedCount: number;
-  /** 模型输出是否被修复过（为真说明这条提示词的输出约束不够硬）。 */
-  repaired: boolean;
-  /** 是否发生截断补全（为真应关注 max_tokens 或"一次要太多条"）。 */
-  truncated: boolean;
-  error: string | null;
-}
-
 /**
- * 抽取汇总报告。
+ * 抽取任务的受理回执。
  *
- * **注意**：T05 阶段 `POST /api/testpoints/extract` 同步返回本结构；
- * T06 起改为返回 `{taskId}` 并走 SSE（§11.1 D-26），届时本类型退化为进度推送的载荷。
+ * `POST /api/testpoints/extract` 自 T06 起是**异步**的：立即返回 `{taskId, taskNo}`，
+ * 真正的抽取由后台任务执行，进度走 `GET /api/tasks/{taskId}/stream`（`useTaskStream`）。
+ *
+ * **这不是抽取结果**。原先这里有一个 `TestPointExtractReport`（含 `unitCount` /
+ * `results[]` 等逐单元明细），是 T05 同步时代的产物；后端改异步后那个结构再也不会返回，
+ * 页面却仍按它渲染 `report.results.map(...)`，于是线上表现为**一提交就整页崩**
+ * （`Cannot read properties of undefined (reading 'map')`）。
+ *
+ * 要逐单元明细请去 `/tasks/{taskId}` 的任务详情页——那里才有 item 级数据。
  */
-export interface TestPointExtractReport {
-  docNo: string;
-  unitCount: number;
-  successCount: number;
-  failedCount: number;
-  parsedCount: number;
-  insertedCount: number;
-  results: TestPointExtractResult[];
+export interface TestPointExtractAck {
+  taskId: string;
+  taskNo: string;
 }

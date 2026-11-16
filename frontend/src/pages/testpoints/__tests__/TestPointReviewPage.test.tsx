@@ -12,10 +12,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ThemeProvider } from '@mui/material/styles';
+import type { ReactElement } from 'react';
 import theme from '@/theme';
 import type { PageResult } from '@/types/common';
 import type { TestPointVO } from '@/types/testpoint';
@@ -29,7 +30,37 @@ vi.mock('@/api/testpoint', () => ({
   batchTestPointStatus: vi.fn(),
 }));
 
-import { listTestPoints } from '@/api/testpoint';
+/**
+ * 可控的 SSE 流状态。
+ *
+ * 必须 mock：jsdom 没有 `EventSource`，真调 `useTaskStream` 会在打开连接时抛错，
+ * 而那会把「页面自身的渲染缺陷」和「环境缺 EventSource」混成同一个红。
+ */
+const streamState = vi.hoisted(() => ({
+  terminal: false,
+  snapshot: null as null | {
+    status: string;
+    progress: number;
+    done: number;
+    total: number;
+    success: number;
+    failed: number;
+    produced: number;
+  },
+}));
+
+vi.mock('@/hooks/useTaskStream', () => ({
+  useTaskStream: () => ({
+    snapshot: streamState.snapshot,
+    items: [],
+    terminal: streamState.terminal,
+    connection: 'open',
+    errorFrame: null,
+    reconnect: () => undefined,
+  }),
+}));
+
+import { extractTestPoints, listTestPoints } from '@/api/testpoint';
 import TestPointReviewPage from '@/pages/testpoints/TestPointReviewPage';
 
 /**
@@ -48,14 +79,18 @@ function emptyPage(): PageResult<TestPointVO> {
  * 里拿不到路由参数，`listTestPoints` 会因为 `enabled: false` 而永不发起请求，
  * 那样测出来的「空态」根本不是本文件要测的那条路径。
  *
- * @returns RTL 的 render 结果
+ * 额外返回 `rerenderSame`：用**同一棵 element 树 + 同一个 QueryClient** 重渲染。
+ * 不能自己再拼一个新树去 rerender——新 `QueryClient` 等于换缓存、组件会重新挂载，
+ * 页面里「已提交的任务」状态直接丢掉，测出来的终态是假的。
+ *
+ * @returns RTL 的 render 结果 + 原树重渲染
  */
-function renderPage(): ReturnType<typeof render> {
+function renderPage(): ReturnType<typeof render> & { rerenderSame: () => void } {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: 0, refetchOnWindowFocus: false } },
   });
 
-  return render(
+  const ui = (): ReactElement => (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={theme}>
         <MemoryRouter initialEntries={['/testpoints/1001']}>
@@ -64,8 +99,13 @@ function renderPage(): ReturnType<typeof render> {
           </Routes>
         </MemoryRouter>
       </ThemeProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+
+  const view = render(ui());
+  // 每次 rerender 都要造**新的 element 对象**：传同一个引用 React 会直接 bailout，
+  // 页面根本不会重渲染，测出来的就还是旧状态
+  return { ...view, rerenderSame: () => view.rerender(ui()) };
 }
 
 describe('pages/testpoints/TestPointReviewPage — 错误态优先级', () => {
@@ -94,5 +134,65 @@ describe('pages/testpoints/TestPointReviewPage — 错误态优先级', () => {
 
     expect(await screen.findByText(/还没有测试点/)).toBeTruthy();
     expect(screen.queryByText(/测试点列表加载失败/)).toBeNull();
+  });
+});
+
+/**
+ * 抽取提交路径：锁「前端按异步契约消费，而不是按 T05 的同步报告结构渲染」。
+ *
+ * 这是线上真实崩过的那个点：后端自 T06 起 `POST /api/testpoints/extract` 只返回
+ * `{taskId, taskNo}`，前端类型却仍是旧的 `TestPointExtractReport`（含 `results[]`），
+ * 页面在 `onSuccess` 里 `setReport(data)` 后立刻 `report.results.map(...)` ——
+ * `results` 是 `undefined`，渲染期抛错，被 ErrorBoundary 兜成整页「页面渲染出错」。
+ *
+ * **为什么 tsc 没拦住**：`post<T>()` 里的 `T` 只是类型断言，HTTP 返回什么它不校验；
+ * 而类型声明本身是手写的，写错也照样编译通过。这类缺陷只有「真的点一次」才暴露。
+ */
+describe('pages/testpoints/TestPointReviewPage — 抽取提交走异步契约', () => {
+  beforeEach(() => {
+    vi.mocked(listTestPoints).mockReset().mockResolvedValue(emptyPage());
+    vi.mocked(extractTestPoints).mockReset();
+    streamState.terminal = false;
+    streamState.snapshot = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('提交后进入「进行中」并显示任务号，不去读不存在的 results', async () => {
+    vi.mocked(extractTestPoints).mockResolvedValue({ taskId: '501', taskNo: 'TP-20261116-001' });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '开始抽取' }));
+
+    expect(await screen.findByText('抽取进行中')).toBeTruthy();
+    // 任务号必须露出来：用户报障时报的是业务单号，不是内部 taskId
+    expect(screen.getByText(/TP-20261116-001/)).toBeTruthy();
+  });
+
+  it('任务进入终态后展示结束态与汇总', async () => {
+    vi.mocked(extractTestPoints).mockResolvedValue({ taskId: '501', taskNo: 'TP-20261116-001' });
+
+    const { rerenderSame } = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '开始抽取' }));
+    expect(await screen.findByText('抽取进行中')).toBeTruthy();
+
+    // 模拟 SSE 推到终态：同一棵树重渲染后应切到结束态
+    streamState.terminal = true;
+    streamState.snapshot = {
+      status: 'SUCCESS',
+      progress: 100,
+      done: 17,
+      total: 17,
+      success: 17,
+      failed: 0,
+      produced: 23,
+    };
+    rerenderSame();
+
+    expect(await screen.findByText('抽取结束')).toBeTruthy();
+    expect(screen.getByText(/17\/17/)).toBeTruthy();
+    expect(screen.getByText(/新增 23/)).toBeTruthy();
   });
 });

@@ -84,7 +84,8 @@ ai-testcase-platform/
 │   ├── 05-frontend-merge-plan.md
 │   ├── 06-incremental-prd-t09-t11.md
 │   ├── 07-incremental-design-t09-t11.md
-│   └── JOURNAL.md           开发日志：做了什么、为什么、踩了什么坑
+│   ├── JOURNAL.md           开发日志：做了什么、为什么、踩了什么坑
+│   └── samples/             可直接上传的示例需求文档（用于验证全链路）
 ├── backend/                 Spring Boot 服务
 │   └── src/main/java/com/aittest/
 │       ├── aicore/          Provider 抽象、提示词渲染、结构化输出解析
@@ -139,6 +140,18 @@ cd frontend && npm install && npm run dev    # http://localhost:5173，/api 已�
 > **打包产物的启动方式**：`java -Dserver.port=8080 -jar backend/target/ai-testcase-platform.jar`。
 > 建议显式带 `-Dserver.port`——部分沙箱/IDE 会注入 `SERVER__PORT` 环境变量，Spring 的宽松绑定会把它映射成 `server.port` 且优先级高于配置文件，导致端口漂移、前端 proxy 失效。正常部署机无此变量，可用 `SERVER_PORT` 控制。
 
+### 用示例文档验证全链路
+
+仓库自带一份可直接上传的需求文档 [`docs/samples/login-requirement.md`](docs/samples/login-requirement.md)（用户中心：登录与密码找回），用来在不准备素材的情况下走一遍「上传 → 解析 → 抽点 → 生成 → 评审」：
+
+| 环节 | 期望结果 |
+|---|---|
+| 解析 | `sections=17`（按 `#` 到 `######` 的标题切分，代码围栏内的 `#` 不计），`ops=0` |
+| 抽点 | mock provider 下 17 个待分析单元全部 `SUCCESS`，首次落库 12 条测试点 |
+| 重复抽点 | `produced=0` 且不报错——`content_hash` 幂等去重，界面会提示「无新增（与库中已有测试点一致）」 |
+
+> 这份文档的边界条款是刻意写具体的（例如「第 5 次失败时应当即返回锁定提示，而不是等到第 6 次」「新密码不得与最近 3 次使用过的历史密码重复」），用来观察抽取结果有没有抓住边界，而不是只把主流程复述一遍。换成别的文档时，把上面三行的数字按实际结果改掉再看。
+
 ## 主要端点
 
 共 43 个端点，覆盖 11 个 Controller。几个核心的：
@@ -167,6 +180,7 @@ cd frontend && npm install && npm run dev    # http://localhost:5173，/api 已�
 | [docs/06-incremental-prd-t09-t11.md](docs/06-incremental-prd-t09-t11.md) | 用例导出 + 指标看板的增量需求 |
 | [docs/07-incremental-design-t09-t11.md](docs/07-incremental-design-t09-t11.md) | 对应的增量设计（端点契约、零值分层、文件清单） |
 | [docs/JOURNAL.md](docs/JOURNAL.md) | 开发日志：每一步做了什么、为什么这么做、踩了什么坑 |
+| [docs/samples/](docs/samples/) | 示例素材：可直接上传的需求文档与预期解析结果，用于验证全链路 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更记录与已知问题 |
 
 ## 开发约定

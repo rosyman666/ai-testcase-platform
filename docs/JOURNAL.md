@@ -663,11 +663,11 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **变异自证（四次，全部命中）**：① `DocDetail` 退回本地拷贝表 → 正例与负例仍绿、哨兵 `__SHARED_FN__` 变红；② `CaseBoard` 的空态分支提到错误态之前 → 「错误态不被空态吞掉」那条变红、另一条仍绿；③ 去掉 `usePageQuery` 的 `+ 1` → 6 例全红；④ 去掉 `ErrorBoundary` 的 `key={pathname}` → 「切路由不粘连」那条变红、其余 7 条仍绿。
 - **验收逐条**：① 结构闭合（侧栏 7 项 / 静态路由 10 条 / `matchNavItem` 9 输入单测）；② 页面级已达成（弹层走 `toast` 是刻意设计）；③ 已达成（`alert` 与 `confirm` 均 0 处）；④ 已达成（换算五处全对 + hook 有测试；排序 UI 未暴露，无对齐对象）；⑤ `tsc` 0 错；⑥ 两个断点实测偏移 0（**限 T12-1 那 18 组**）。
 - **浏览器层（仅 T12-1）**：QA 用 Playwright + 本机 Chrome 实跑 **9 路由 × 1280/1920 = 18 组全 PASS**（`scrollWidth === clientWidth`、`body.scrollHeight === innerHeight`、Drawer 恰好 240px）。
-- **范围边界**：`/testpoints` 落地页（T12-2a）**只有 jsdom 覆盖，没进过浏览器**；`getParseStatusMeta` 的未知码分支**没有直接单测**（在 `DocDetail.test.tsx` 里被 mock 包了一层，只间接走到）；`ErrorBoundary` 的兜底 UI 只有 jsdom 证据。三条如实记账，不写成「验过了」。
+- **范围边界**：`/testpoints` 落地页（T12-2a）原只有 jsdom 覆盖，**2026-11-16 已在真浏览器补上点击链路**（用户实跑：选文档 → 开始抽取 → 「抽取进行中」进度面板 → 列表自动刷新，后端任务 `T20261116-000004` 17/17 `SUCCESS`、`failed=0`、`produced=0`，14:56:42 完成）；`getParseStatusMeta` 的未知码分支**没有直接单测**（在 `DocDetail.test.tsx` 里被 mock 包了一层，只间接走到）；`ErrorBoundary` 的兜底 UI 只有 jsdom 证据。三条如实记账，不写成「验过了」。
 - **未完成的眼验项**：`/metrics` 四个 Tab 的真实渲染、`/cases` 导出弹窗、xlsx 用 Excel 与 WPS **各打开一次**验中文不乱码。
 
 ### 下一步
-- **T12 收尾仅剩一件事**：`/testpoints` 在真浏览器里补一次 1280/1920 实测（其余 9 路由那 18 组已在 T12-1 验过）。
+- **T12 收尾仅剩一件事**：`/testpoints` 在真浏览器里补一次 1280/1920 实测（其余 9 路由那 18 组已在 T12-1 验过）。**点击链路已于 2026-11-16 补上，剩的只是布局量测**——两件事别混成一件：「按钮按下去不崩」与「表格不冒横向滚动条」是两条独立的证据，前者今天有了，后者还没有。
 - **T12-1 遗留**：`Home.tsx` 的三入口过渡导航待 `AppShell` 稳定后删除（D-54）。
 - **T10 执行结果导入**：`/metrics/execution`（§4.2 #48）就等它——`execution_run` / `execution_result` 两表已建但 0 行，端点交付即空态，所以当时跳过而非放假数据。
 - **技术债**：`DocService.java:727-731` / `TestPointService.java:251-255` 列表默认排序方向（D-55 未修部分）；D-42 任务级 `error_code`；D-46 few-shot 探针改二值判别；`getParseStatusMeta` 未知码补直接单测。

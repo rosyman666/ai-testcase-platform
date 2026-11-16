@@ -675,6 +675,55 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 ---
 
+## 2026-11-16 · 阶段 12 补丁 · T12-3 真实崩溃修复（`0fecb74`）
+
+> 起点不是计划内任务，是用户点了一次按钮：`测试点评审` → 选文档 → `开始抽取` → 整页变成
+> 「页面渲染出错 / Cannot read properties of undefined (reading 'map')」。
+
+### 做了什么
+1. **定位根因**（`D-58`）：`POST /api/testpoints/extract` 在 `D-26` 已改异步、只返回 `{taskId, taskNo}`；前端 `types/testpoint.ts` 仍声明 T05 同步时代的 `TestPointExtractReport`（含 `results[]`），`TestPointReviewPage.tsx` 照旧 `report.results.map(...)` → 渲染期 `undefined.map`。
+2. **改类型**：删 `TestPointExtractReport` / `TestPointExtractResult`，新增 `TestPointExtractAck { taskId; taskNo }`，JSDoc 写明「这不是抽取结果」。
+3. **改 API 层**：`extractTestPoints` 返回 `Promise<TestPointExtractAck>`；把原 JSDoc「T05 阶段是同步的……不要在这里加客户端轮询绕过去」整段重写为异步契约——那句话在当时是对的，在现在会**主动误导下一个人去删轮询**。
+4. **改页面**：`report` state → `extractTask`（存回执）+ `useTaskStream(extractTask?.taskId)`；终态 `useEffect` 内失效 `['testpoints']` 并 toast 汇总（`failed > 0` 降 warning），用 `notifiedTaskRef` 防同一任务重复提示；按钮三态文案（`提交中… / 抽取中… / 开始抽取`）、进度 Alert、Dialog 改为「进行中 / 结束」两套标题与按钮。
+5. **补测试**：`TestPointReviewPage.test.tsx` 2 例 → 5 例，新增「提交后进入进行中并显示任务号」「终态后显示结束态与汇总」「`produced=0` 时点明幂等去重而不是说新增 0 条」。
+6. **文档登记**：`docs/01` 新增 `D-58`（偏差 57 → 58）、`§12` 新增一条 T12 前置条件依赖（87 → 88）、`§6` T12 行补该缺陷与基线 101 → 103；`CHANGELOG` 补 `### Fixed`。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| 页面改成**订阅 SSE 进度**，而不是提交后只 toast 一句「已提交」 | 17 个单元秒级跑完是 mock 的运气；接真实模型后一篇文档几分钟，只回一句「已提交」用户无从判断是在跑还是卡死 | 提交成功即 toast + 依赖用户手动刷新列表——最省事，但也最像「点了没反应」 |
+| 终态通知用 `notifiedTaskRef` 记录已播报的 `taskId` | `useEffect` 依赖里带了 `snapshot` 的字段，SSE 每帧都会重跑 effect；不设闸门会连弹 3 条相同的 toast | 依赖数组只留 `terminal`——会漏掉「先 terminal、后 snapshot 补齐」的帧序 |
+| 终态只 `invalidateQueries(['testpoints'])`，**不**手动 push 新数据 | 抽取侧真正的结果是后端幂等去重后的集合（本轮 `produced=0` 就是全被去重），前端猜不出最终列表 | 把 `produced` 条数拼进本地列表——猜错就出现「列表上有、刷新就没了」 |
+| `failed > 0` 用 `warning` 而非 `error` | 部分失败时另一半单元是成功的，列表也已刷新；`error` 会让用户以为整次白跑 | 一律 `success`——把部分失败藏起来，用户以为都成了 |
+| fallback 弹窗保留「后台运行」出口 | 任务已经在后端跑，关掉弹窗不影响结果；强行拦住反而制造「必须等它跑完」的错觉 | 只给「知道了」——语义上更像「这条信息可以忽略了」 |
+| 测试里 `vi.mock('@/hooks/useTaskStream')` 而不是装 `EventSource` polyfill | jsdom 没有 `EventSource`，真实现会炸；而炸出来的红与「页面缺陷」的红长得一样，无法归因 | 引 `eventsource` polyfill——为一条测试加一个运行时依赖，且掩盖的正是要测的边界 |
+
+### 踩坑记录
+- **`post<T>` 的泛型是断言，不是契约**：后端返回 `ApiResponse<Map<String,String>>`、前端声明 `Promise<TestPointExtractReport>`，两边都合法、`tsc --noEmit` **0 错**。这是本项目第一次出现「类型系统看着全覆盖、实际一点没护住」的缺陷——**TS 只能保证「你按自己声明的形状用」，不能保证「你声明的形状等于服务端返回的形状」**。
+- **101 例测试全绿，没有一条点过那个按钮**：`TestPointReviewPage` 原有 2 例测的是「列表渲染」与「选文档」，恰好绕开了唯一的提交路径。**测试数量的增长不等于覆盖面的增长**——分母从 57 涨到 101 时，最危险的那个交互一次都没被走过。
+- **三态齐全给了一种虚假的完备感**：T12-3 刚把四个页面的 `isLoading / isError / empty` 全补齐并逐条落账，紧接着就崩在同一个页面。三态约束的是**页面态**，覆盖不到**提交动作的返回值形状**——两类缺陷正交，前一类的完成度对后一类零贡献。
+- **新测试第一次写错在 `rerender`**：`rerender(ui())` 传同一个 element 引用被 React bailout，永远停在「进行中」，报的是 `Unable to find an element with the text: 抽取结束`。第一次修是「重建整棵树 + `new QueryClient()`」——组件重新挂载、`extractTask` 状态丢失，还是红。**正解是 element 每次新建、`QueryClient` 复用**：换 client 等于换缓存，测出来的终态是假的。
+- **`vi.hoisted` 绕 TDZ**：`vi.mock` 的工厂会被提升到 import 之前，工厂里读模块级 `let` 直接 `ReferenceError`。mock 工厂必须 `{ ...actual, ... }` 交接。
+- **验证「修好了」的方式不能只是「跑绿了」**：把页面 `git checkout HEAD --` 回退到缺陷版，新用例**原样复现用户截图里那句报错**并两条全红，再恢复——否则新用例只证明「现在不崩」，没证明「它抓得住崩」。这次回退自证是本轮唯一让人信服的证据。
+- **环境坑：`npx vitest run` 在默认并行 worker 池下会静默丢测试文件**。同一份代码连跑两次分别报 `13 files / 94 tests` 与 `12 files / 70 tests`，两次都显示全绿、`Test Files N passed`，只是 N 不对；把丢的两个文件单独跑又是 4/4 绿。伴随一条 `EPERM ... deps_temp` 的 unhandled error，但**没有失败用例、退出码也不一定非 0**。换成 `npx vitest run --pool=forks --poolOptions.forks.singleFork=true` 稳定复现 **14 files / 104 tests**。**教训：绿之前先核分母。**「N 个文件全过」里的 N 如果是丢出来的，它比红更危险——红会让人去查，绿不会。
+- **`/d/Temp` 写入被沙箱部分拦截**：`npx tsc --noEmit > /d/Temp/x.txt` 能写，但 vitest 往同一个盘写 JSON 报告与缓存时会 `EPERM`；`node -e "require('/d/Temp/...')"` 也不认 `/d/` 前缀，得用 `D:/`。
+- **用户那次点击的后端其实成功了**：库里该文档已有 12 条测试点、任务 `T20261116-000003` 17/17 `SUCCESS`、耗时 1.05s。**一个纯前端渲染缺陷，把一次成功的后端调用呈现成了「功能坏了」**——排障时先看后端日志，能省掉一次「重跑一遍说不定就好了」的误判。
+
+### 验收事实（2026-11-16）
+- **`tsc --noEmit`**：0 错（重定向到文件取 `$?`，不经管道）。
+- **`vitest`**：**14 files / 104 tests 全绿**（`--pool=forks --poolOptions.forks.singleFork=true`），T12 阶段净增 47 例。
+- **缺陷版回退自证**：回退后新用例 2 条全红、报错文本与用户截图逐字一致；恢复后 4/4 绿。
+- **真实链路（mock provider）**：提交 → `{taskId: 2122339461350871041, taskNo: T20261116-000003}` → `SUCCESS done=17 total=17 success=17 failed=0 produced=0`，`startedAt 14:42:13.651Z` → `finishedAt 14:42:14.703Z`（1.05s）。`produced=0` 是幂等去重（`content_hash` 相同），不是失败。
+- **范围边界**：本次只做到 jsdom + 缺陷版自证，**用户浏览器里的复验未完成**——需刷新页面（HMR 已生效）再点一次确认进度面板出现。
+
+### 下一步
+- **等用户复验**：刷新 `/testpoints` → 选文档 → 开始抽取，应看到「抽取进行中」进度面板与任务号，结束后列表自动刷新并弹汇总。
+- **`produced=0` 的提示语待改**：现在会说「抽取完成：新增 0 条」，用户容易读成「白跑了」。应改成「抽取完成：17 个单元全部成功，12 条已存在（无新增）」，把「去重」这个词显式说出来。
+- **`docs/samples/login-requirement.md` 是否入库待定**：这份测试用示例文档目前是未跟踪文件，还没决定进不进仓库。
+- 其余遗留同上一节（`/testpoints` 真浏览器实测、`getParseStatusMeta` 未知码单测、`/metrics` 与导出弹窗眼验、T10 执行结果导入、D-54 / D-55）。
+
+---
+
 ## 模板（新增记录时复制）
 
 ```markdown

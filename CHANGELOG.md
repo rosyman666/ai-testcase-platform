@@ -54,6 +54,7 @@
 
 ### Fixed
 
+- **抽取按钮把整页打成兜底页（`0fecb74`，T12-3 补丁，`D-58`）**：`POST /api/testpoints/extract` 自 `D-26` 起改为异步、立即返回 `{taskId, taskNo}`，但前端类型仍是 T05 同步时代的 `TestPointExtractReport`（含 `results[]`），页面照旧 `report.results.map(...)` —— 回执里没有 `results`，渲染期抛 `TypeError: Cannot read properties of undefined (reading 'map')`，整页落到 `ErrorBoundary` 兜底页。`post<T>` 的 `T` 只是类型断言、不校验响应形状，`tsc --noEmit` 因此 0 错；`vitest` 侧也没有任何用例真的点过一次「开始抽取」，**101 例全绿**。修法：`types/testpoint.ts` 删 `TestPointExtractReport` / `TestPointExtractResult`，新增 `TestPointExtractAck { taskId, taskNo }`；`api/testpoint.ts` 返回受理回执并把过期的「T05 是同步的、不要加客户端轮询」JSDoc 改写为异步契约；页面保存回执 → 订阅 `useTaskStream` 显示单元级进度 → 终态失效 `['testpoints']` 查询并给出汇总（`failed > 0` 降级为 warning），Dialog 标题与按钮随之分「进行中 / 结束」两态。测试 2 例 → 5 例（新增「进行中显示任务号」「终态显示 17/17 与新增数」「`produced=0` 时点明幂等去重」）。**验收用「缺陷版回退自证」**：把页面 `git checkout` 回缺陷版再跑新用例，原样复现同一句报错且两条全红，恢复后 4/4 绿。**后端一直是成功的**——用户第一次点击时 17 个单元全部 `SUCCESS`、12 条测试点已入库，纯前端缺陷把一次成功调用呈现成了「功能坏了」
 - **错误态被空态吞掉（`7446c53`，T12-3）**：`CaseBoard` 与 `TestPointReviewPage` 的 if 链是 `isLoading → length === 0 → 列表`，**没有 error 分支**；而请求失败时 `data?.records ?? []` 同样得到空数组，于是「加载失败」被显示成「暂无用例」，还配一句「先运行代码生成任务」/「点右上角『开始抽取』」——**用户在抽取刚失败之后被引导去再点一次抽取**，真正的错误一次都不出现在界面上。两处都补 `isError` 分支且**必须排在 `length === 0` 之前**，并各补 2 例回归（一例断言错误态出现且空态文案不得同时出现，一例断言成功空数组走空态，防止把 error 分支写成恒真）
 - **`TaskDetail` 错误态没有重试（`7446c53`）**：原来只给「返回列表」，一次网络抖动人就得重新找回来路。补「重试」，并把 `description` 按是否真为 error 分开——加载失败说检查网络，查不到说任务可能已删除
 

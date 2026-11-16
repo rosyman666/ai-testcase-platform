@@ -195,4 +195,36 @@ describe('pages/testpoints/TestPointReviewPage — 抽取提交走异步契约',
     expect(screen.getByText(/17\/17/)).toBeTruthy();
     expect(screen.getByText(/新增 23/)).toBeTruthy();
   });
+
+  /**
+   * 重复抽取的真实形态：`produced=0`。
+   *
+   * 抽取是幂等的（`content_hash = sha256(doc_id + title + category)`），同一篇文档
+   * 再抽一遍，全部命中库里已有的测试点，`produced` 就是 0 —— **这不是失败**。
+   * 但界面若只说「新增 0 条」，用户读到的意思是「白跑了」，接着就会怀疑
+   * 后端没干活、或者自己点错了文档。
+   */
+  it('重复抽取 produced=0 时不说「新增 0 条」，而是点明幂等去重', async () => {
+    vi.mocked(extractTestPoints).mockResolvedValue({ taskId: '502', taskNo: 'TP-20261116-002' });
+
+    const { rerenderSame } = renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '开始抽取' }));
+    expect(await screen.findByText('抽取进行中')).toBeTruthy();
+
+    streamState.terminal = true;
+    streamState.snapshot = {
+      status: 'SUCCESS',
+      progress: 100,
+      done: 17,
+      total: 17,
+      success: 17,
+      failed: 0,
+      produced: 0,
+    };
+    rerenderSame();
+
+    expect(await screen.findByText(/本轮没有新增/)).toBeTruthy();
+    // 反向断言：那句什么都没解释的「抽取完成，列表已刷新」不得同时出现
+    expect(screen.queryByText('抽取完成，列表已刷新。')).toBeNull();
+  });
 });

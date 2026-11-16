@@ -136,8 +136,13 @@ export default function TestPointReviewPage(): JSX.Element {
 
     const failed = extractStream.snapshot?.failed ?? 0;
     const produced = extractStream.snapshot?.produced ?? 0;
+    const total = extractStream.snapshot?.total ?? 0;
     if (failed > 0) {
       toast(`抽取结束：新增 ${produced} 条，${failed} 个单元失败`, 'warning');
+    } else if (produced === 0 && total > 0) {
+      // produced=0 不是失败：抽取是幂等的（content_hash 由 doc_id+title+category 决定），
+      // 同一篇文档重复抽取时全部命中库中已有的测试点。说「新增 0 条」用户会读成「白跑了」。
+      toast(`${total} 个单元全部成功，无新增（与库中已有测试点一致）`, 'success');
     } else {
       toast(`抽取完成：新增 ${produced} 条`, 'success');
     }
@@ -146,6 +151,7 @@ export default function TestPointReviewPage(): JSX.Element {
     extractStream.terminal,
     extractStream.snapshot?.failed,
     extractStream.snapshot?.produced,
+    extractStream.snapshot?.total,
     queryClient,
   ]);
 
@@ -427,7 +433,11 @@ export default function TestPointReviewPage(): JSX.Element {
             )}
 
             {extractStream.terminal && (snap?.failed ?? 0) === 0 && (
-              <Alert severity="success">抽取完成，列表已刷新。</Alert>
+              <Alert severity="success">
+                {(snap?.produced ?? 0) === 0
+                  ? `抽取完成，${snap?.total ?? 0} 个单元全部成功。本轮没有新增——抽取是幂等的，同一篇文档重复抽取会命中库里已有的测试点，列表已刷新。`
+                  : '抽取完成，列表已刷新。'}
+              </Alert>
             )}
           </Stack>
         </DialogContent>

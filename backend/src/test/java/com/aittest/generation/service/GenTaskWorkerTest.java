@@ -189,11 +189,16 @@ class GenTaskWorkerTest {
     }
 
     @Test
-    @DisplayName("有失败 item：终态 PARTIAL，错误码 E_INTERNAL + 中文提示")
+    @DisplayName("有失败 item：终态 PARTIAL，任务级错误码取首个失败 item 的码 + 中文提示")
     void finalizeWithFailuresWritesChineseError() throws Exception {
         wireSuccessOutcome();
         when(genTaskItemMapper.countByStatus(TASK_ID))
                 .thenReturn(List.of(row("SUCCESS", 2), row("FAILED", 1)));
+        // D-42：本用例执行的是**成功** item，库里没有真实失败行，所以必须显式 stub 一个
+        // 具体码。不 stub 的话 Mockito 给 null → safeErrorCode 回退 E_INTERNAL，
+        // 断言"恰好也是 E_INTERNAL"照样绿——那是假绿：它守的是回退值，不是聚合结果。
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID))
+                .thenReturn(ErrorCode.E_LLM_PARSE_EXHAUSTED.name());
         when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
                 any(String.class), any(LocalDateTime.class))).thenReturn(1);
 
@@ -205,11 +210,36 @@ class GenTaskWorkerTest {
         verify(genTaskMapper).markTerminal(eq(TASK_ID), status.capture(), code.capture(),
                 msg.capture(), any(LocalDateTime.class));
         assertThat(status.getValue()).isEqualTo(TaskStatus.PARTIAL.code());
-        assertThat(code.getValue()).isEqualTo("E_INTERNAL");
+        assertThat(code.getValue()).isEqualTo("E_LLM_PARSE_EXHAUSTED");
         assertThat(msg.getValue()).contains("1", "条子项失败");
         verify(handler).onTaskFinalize(any(GenTask.class), eq(TaskStatus.PARTIAL));
         verify(progressPublisher).finish(any(GenTask.class), eq(TaskStatus.PARTIAL),
-                eq("E_INTERNAL"), eq("有 1 条子项失败"));
+                eq("E_LLM_PARSE_EXHAUSTED"), eq("有 1 条子项失败"));
+    }
+
+    @Test
+    @DisplayName("D-42 首个语义：任务级 error_code 是首个失败 item 的码，不是 E_INTERNAL")
+    void taskErrorCodeTakesFirstFailedItemCode() {
+        // 一个任务里混着多种失败码时，任务行必须能直接回答"这批为什么挂"，
+        // 而不是永远写 E_INTERNAL 让用户逐条点子项去翻。
+        when(genTaskItemMapper.countByStatus(TASK_ID))
+                .thenReturn(List.of(row("SUCCESS", 1), row("FAILED", 2)));
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID))
+                .thenReturn(ErrorCode.E_PARAM_INVALID.name());
+        when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
+                any(String.class), any(LocalDateTime.class))).thenReturn(1);
+
+        worker.finalizeIfDone(TASK_ID);
+
+        // 只断"等于首个码"，并显式排除 E_INTERNAL：后者是回退值，
+        // 若聚合没生效，这里会以 E_INTERNAL 通过——那正是要挡的假绿。
+        verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.PARTIAL.code()),
+                eq("E_PARAM_INVALID"), eq("有 2 条子项失败"), any(LocalDateTime.class));
+        verify(progressPublisher).finish(any(GenTask.class), eq(TaskStatus.PARTIAL),
+                eq("E_PARAM_INVALID"), eq("有 2 条子项失败"));
+        // 参数必须带上任务 id：写死 null 或取错 id 会静默回退 E_INTERNAL，
+        // 而上面两条断言仍可能因别的原因通过
+        verify(genTaskItemMapper).selectFirstFailedErrorCode(TASK_ID);
     }
 
     @Test
@@ -334,15 +364,17 @@ class GenTaskWorkerTest {
         when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
                 .thenReturn(ItemOutcome.failed("E_LLM_UPSTREAM", "模型超时", 10));
         when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 1)));
+        // D-42：失败 item 的码是 E_LLM_UPSTREAM，任务级必须跟着它，不能回退成 E_INTERNAL
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID)).thenReturn("E_LLM_UPSTREAM");
         when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
                 any(String.class), any(LocalDateTime.class))).thenReturn(1);
 
         worker.run(ITEM_ID);
 
         verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.FAILED.code()),
-                eq("E_INTERNAL"), eq("有 1 条子项失败"), any(LocalDateTime.class));
+                eq("E_LLM_UPSTREAM"), eq("有 1 条子项失败"), any(LocalDateTime.class));
         verify(progressPublisher).finish(any(GenTask.class), eq(TaskStatus.FAILED),
-                eq("E_INTERNAL"), eq("有 1 条子项失败"));
+                eq("E_LLM_UPSTREAM"), eq("有 1 条子项失败"));
         verify(handler).onTaskFinalize(any(GenTask.class), eq(TaskStatus.FAILED));
     }
 
@@ -489,18 +521,22 @@ class GenTaskWorkerTest {
         // countByStatus 结果表达 "pending=0 且 running=0"，再走 dispatcher 真正调用的
         // public 入口 finalizeIfDone(Long)——否则回收器每 60s 空转、任务永不收敛。
         when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 3)));
+        // D-42：超时回收写过来的码是 E_TASK_DEADLINE（failRunningItemsOfTask /
+        // failPendingItemsOfTask 的入参），任务级必须透出它，而不是 E_INTERNAL
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID))
+                .thenReturn(ErrorCode.E_TASK_DEADLINE.name());
         when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
                 any(String.class), any(LocalDateTime.class))).thenReturn(1);
 
         worker.finalizeIfDone(TASK_ID);
 
-        // 3 条全失败 → FAILED 终态，且错误码/文案非空（NOT NULL 列）
+        // 3 条全失败 → FAILED 终态，任务级错误码是回收器写入的真实原因（NOT NULL 列，非空）
         verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.FAILED.code()),
-                eq("E_INTERNAL"), eq("有 3 条子项失败"), any(LocalDateTime.class));
+                eq("E_TASK_DEADLINE"), eq("有 3 条子项失败"), any(LocalDateTime.class));
         // B1 边界：抢到收尾权之后才允许做任务级动作、才推终态帧
         verify(handler).onTaskFinalize(any(GenTask.class), eq(TaskStatus.FAILED));
         verify(progressPublisher).finish(any(GenTask.class), eq(TaskStatus.FAILED),
-                eq("E_INTERNAL"), eq("有 3 条子项失败"));
+                eq("E_TASK_DEADLINE"), eq("有 3 条子项失败"));
         verify(progressPublisher).refreshProgressField(any(GenTask.class));
     }
 
@@ -554,13 +590,15 @@ class GenTaskWorkerTest {
         when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
                 .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "上游超时", true));
         when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 1)));
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID)).thenReturn("E_LLM_UPSTREAM");
         when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
                 any(String.class), any(LocalDateTime.class))).thenReturn(1);
 
         worker.run(ITEM_ID);
 
         // ① item 终态 FAILED；② error_code 是 LlmException 的原码而不是 E_INTERNAL；
-        // ③ attempts=3（透传错误码**不影响**重试次数，retryable=false 也照旧重试 3 次）
+        // ③ attempts=3 —— 本例是**第 3 次尝试**（item.attempts=2 起步），靠次数上限进终态，
+        //    与 retryable 无关（D-45 之后 retryable=false 会提前进终态，见下方专门用例）
         ArgumentCaptor<Wrapper<GenTaskItem>> wrapper = updateWrapperCaptor();
         verify(genTaskItemMapper).update(isNull(), wrapper.capture());
         List<Object> values = setValues(wrapper.getValue());
@@ -570,9 +608,10 @@ class GenTaskWorkerTest {
         verify(genTaskItemMapper, never()).rescheduleForRetry(any(), any(Integer.class),
                 any(), any(), any());
 
-        // D-42 边界锁：**任务级** error_code 仍然恒 E_INTERNAL（本批明确不修，别顺手改）
+        // D-42：任务级 error_code 不再是恒 E_INTERNAL，而是首个失败 item 的码。
+        // 这条同时是"item 级 = 任务级"的一致性锁：两处都取自同一个 LlmException。
         verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.FAILED.code()),
-                eq("E_INTERNAL"), eq("有 1 条子项失败"), any(LocalDateTime.class));
+                eq("E_LLM_UPSTREAM"), eq("有 1 条子项失败"), any(LocalDateTime.class));
     }
 
     @Test
@@ -593,6 +632,46 @@ class GenTaskWorkerTest {
         assertThat(msg.getValue()).isEqualTo("上游超时");
         // 未到上限 → 不是 item 终态，不收尾
         verify(genTaskMapper, never()).markTerminal(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    @DisplayName("D-45 短路：retryable=false 的模型失败第 1 次就进终态，不再退避重试 3 次")
+    void nonRetryableLlmFailureGoesPermanentImmediately() throws Exception {
+        // 鉴权失败 / 参数错 / 配额耗尽这类确定性错误，重试 3 次只是把同一个错误再问 3 遍：
+        // 任务要多等 2s + 4s 两个退避周期才收敛，而结论从一开始就注定。
+        // 此前 isRetryable() 只被写进日志、不参与决策（D-45）。
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "鉴权失败", false));
+        when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 1)));
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID)).thenReturn("E_LLM_UPSTREAM");
+        when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
+                any(String.class), any(LocalDateTime.class))).thenReturn(1);
+
+        worker.run(ITEM_ID);
+
+        // ① 核心断言：一次都不能安排重试
+        verify(genTaskItemMapper, never()).rescheduleForRetry(any(), any(Integer.class),
+                any(), any(), any());
+
+        ArgumentCaptor<Wrapper<GenTaskItem>> wrapper = updateWrapperCaptor();
+        verify(genTaskItemMapper).update(isNull(), wrapper.capture());
+        List<Object> values = setValues(wrapper.getValue());
+
+        // ② item 置 FAILED、错误码保住原码、attempts=1。
+        //    attempts 断言成 1 而不是 3：3 说明它还是走了两轮退避，短路没生效
+        assertThat(values).contains("FAILED", 1, "E_LLM_UPSTREAM", "鉴权失败");
+        // ③ latency_ms 必须出现在 SET 里 —— 这是 failPermanentlyWithOutcome 与
+        //    failPermanently 的**唯一结构差异**：后者不写该列，换成它会让这批 item 的
+        //    耗时静默退化成 0（指标看板上表现为"这些失败瞬间完成"）
+        assertThat(((LambdaUpdateWrapper<GenTaskItem>) wrapper.getValue()).getSqlSet())
+                .contains("latency_ms");
+
+        // ④ 收尾照常：任务级 error_code 也是这个码
+        verify(genTaskMapper).markTerminal(eq(TASK_ID), eq(TaskStatus.FAILED.code()),
+                eq("E_LLM_UPSTREAM"), eq("有 1 条子项失败"), any(LocalDateTime.class));
+        verify(progressPublisher).onItemDone(any(GenTask.class), any(GenTaskItem.class),
+                any(ItemOutcome.class));
     }
 
     @Test

@@ -1,5 +1,7 @@
 package com.aittest.generation.support;
 
+import com.aittest.doc.domain.ApiOperation;
+import com.aittest.doc.domain.DocSource;
 import com.aittest.execution.domain.ExecutionResult;
 import com.aittest.execution.domain.ExecutionRun;
 import com.aittest.generation.domain.GenTask;
@@ -7,6 +9,7 @@ import com.aittest.generation.domain.GenTaskItem;
 import com.aittest.system.domain.FailureCategory;
 import com.aittest.testcase.domain.CaseReview;
 import com.aittest.testcase.domain.TestCase;
+import com.aittest.testpoint.domain.TestPoint;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -42,9 +45,8 @@ public final class MybatisPlusLambdaCache {
      * / {@link ExecutionRun} / {@link ExecutionResult} / {@link FailureCategory} 的
      * TableInfo 与 lambda 列缓存。
      *
-     * <p>只注册真正会被 lambda wrapper 用到的实体：其余 mapper（TestPoint / DocSource /
-     * ExtractPlanner / RejectReason）都是 mock，不会触发真实的列解析。少注册实体也避免把
-     * 无关实体的注解约束带进单测。</p>
+     * <p>只注册真正会被 lambda wrapper 用到的实体：其余 mapper（ExtractPlanner / RejectReason）
+     * 都是 mock，不会触发真实的列解析。少注册实体也避免把无关实体的注解约束带进单测。</p>
      *
      * <p><b>T08 追加后两个</b>：{@code CaseReviewService} 锁用例行用
      * {@code lambdaQuery().eq(TestCase::getId, ...).last("FOR UPDATE")}，批量评审用
@@ -53,6 +55,15 @@ public final class MybatisPlusLambdaCache {
      * <p><b>T10 追加后三个</b>：{@code ExecutionQueryService} 的分页/明细/字典查询分别
      * 用 {@code LambdaQueryWrapper<ExecutionRun>}、{@code <ExecutionResult>}、
      * {@code <FailureCategory>}。</p>
+     *
+     * <p><b>D-55 追加后三个</b>：{@code DocService#applySort}、
+     * {@code TestPointService#applySort} 与 {@code DocService#operations}（{@code seq_no}
+     * 默认升序那一处）现在都有排序方向的回归测试（要拿 {@code wrapper.getSqlSegment()}
+     * 断言 {@code ASC}/{@code DESC}），而拼 wrapper 的
+     * {@code orderBy(..., DocSource::getCreatedAt)} / {@code ApiOperation::getSeqNo}
+     * 同样需要 lambda 列缓存。
+     * 这三处的 mapper 仍是 mock，但<b>列名解析发生在 wrapper 里、与 mapper 无关</b>——
+     * 之前写"TestPoint/DocSource 都是 mock 所以不用注册"是按 mapper 判断的，判断错了。</p>
      *
      * <p><b>为什么不再用"装过一次就 return"的开关</b>：那个开关让<b>注册内容依赖于测试类的
      * 执行顺序</b>——先跑的类装完旧的三/四个实体就把 {@code installed} 置 true，后跑的类新增的
@@ -70,6 +81,9 @@ public final class MybatisPlusLambdaCache {
         installEntity(assistant, ExecutionRun.class);
         installEntity(assistant, ExecutionResult.class);
         installEntity(assistant, FailureCategory.class);
+        installEntity(assistant, DocSource.class);
+        installEntity(assistant, TestPoint.class);
+        installEntity(assistant, ApiOperation.class);
     }
 
     private static void installEntity(MapperBuilderAssistant assistant, Class<?> entityClass) {

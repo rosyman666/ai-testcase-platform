@@ -83,6 +83,18 @@
            AND status = 'PENDING'
     </update>
 
+    <!-- 任务级 error_code 聚合（D-42）：取首个失败 item 的码。
+         ORDER BY id 是语义的一部分 —— 不加它返回哪一行不保证稳定，而任务级字段只写一次。
+         没有失败行时返回 null，由调用方 safeErrorCode 兜底成 E_INTERNAL。 -->
+    <select id="selectFirstFailedErrorCode" resultType="java.lang.String">
+        SELECT error_code
+          FROM gen_task_item
+         WHERE task_id = #{taskId}
+           AND status = 'FAILED'
+         ORDER BY id
+         LIMIT 1
+    </select>
+
     <select id="countByStatus" resultType="java.util.HashMap">
         SELECT status AS status, COUNT(*) AS cnt
           FROM gen_task_item

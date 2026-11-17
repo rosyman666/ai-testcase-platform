@@ -247,12 +247,16 @@ public class TestPointService {
     private void applySort(LambdaQueryWrapper<TestPoint> wrapper, PageQuery query) {
         String column = query.sortColumnOrDefault("created_at");
         boolean desc = query.isDesc();
+        // MP 的 orderBy(condition, isAsc, column) 第二参是 **isAsc** 不是 isDesc：
+        // 直接把 isDesc() 传进来会把方向整体翻转——点「降序」拿到升序，且不报错、类型也对，
+        // 只有在页面上肉眼比对"新测试点排到最后一页"时才看得出来（§11.1 D-55）。
+        boolean isAsc = !desc;
         switch (column) {
-            case "updated_at" -> wrapper.orderBy(true, desc, TestPoint::getUpdatedAt);
-            case "title" -> wrapper.orderBy(true, desc, TestPoint::getTitle);
-            case "category" -> wrapper.orderBy(true, desc, TestPoint::getCategory);
-            case "risk_level" -> wrapper.orderBy(true, desc, TestPoint::getRiskLevel);
-            default -> wrapper.orderBy(true, desc, TestPoint::getCreatedAt);
+            case "updated_at" -> wrapper.orderBy(true, isAsc, TestPoint::getUpdatedAt);
+            case "title" -> wrapper.orderBy(true, isAsc, TestPoint::getTitle);
+            case "category" -> wrapper.orderBy(true, isAsc, TestPoint::getCategory);
+            case "risk_level" -> wrapper.orderBy(true, isAsc, TestPoint::getRiskLevel);
+            default -> wrapper.orderBy(true, isAsc, TestPoint::getCreatedAt);
         }
         wrapper.orderByDesc(TestPoint::getId);
     }

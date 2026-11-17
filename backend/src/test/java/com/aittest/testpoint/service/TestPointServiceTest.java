@@ -7,15 +7,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.aittest.common.PageQuery;
 import com.aittest.common.enums.TestPointStatus;
+import com.aittest.generation.support.MybatisPlusLambdaCache;
 import com.aittest.testpoint.domain.TestPoint;
 import com.aittest.testpoint.domain.TestPointHasher;
 import com.aittest.testpoint.dto.TestPointDraft;
 import com.aittest.testpoint.mapper.TestPointMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -64,6 +69,16 @@ class TestPointServiceTest {
     @BeforeEach
     void setUp() {
         service = new TestPointService(mapper);
+    }
+
+    /**
+     * 安装 lambda 列缓存：排序用例要读 {@code wrapper.getSqlSegment()}，
+     * 而 {@code orderBy(..., TestPoint::getCreatedAt)} 解析列名需要 TableInfo。
+     * 类里其余用例不拼 wrapper，装了也无副作用（{@code install()} 幂等）。
+     */
+    @BeforeAll
+    static void installLambdaCache() {
+        MybatisPlusLambdaCache.install();
     }
 
     /**
@@ -263,5 +278,65 @@ class TestPointServiceTest {
         assertThat(superseded).isEqualTo(1);
         assertThat(keptByUnit1.getStatus()).isEqualTo(TestPointStatus.ACTIVE.code());
         assertThat(vanished.getStatus()).isEqualTo(TestPointStatus.SUPERSEDED.code());
+    }
+
+    // ------------------------------------------------------------------
+    // 列表排序方向（§11.1 D-55）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("列表默认 created_at DESC（把 isAsc 写回 desc 时这条必须红：新点会排到最后一页）")
+    void pageDefaultSortsByCreatedAtDesc() {
+        when(mapper.selectPage(any(), any())).thenReturn(emptyPage());
+
+        service.page(DOC, null, null, new PageQuery());
+
+        String sql = capturedWrapperSql();
+        assertThat(sql).containsIgnoringCase("created_at DESC").containsIgnoringCase("id DESC");
+        // 反向断言才是承重那句：正向断言在"整段 ORDER BY 消失"时也会绿，只有它能钉住方向
+        assertThat(sql).as("默认必须是降序，升序会把最新测试点排到最后一页")
+                .doesNotContainIgnoringCase("created_at ASC");
+    }
+
+    @Test
+    @DisplayName("显式 sort=createdAt,asc 时按 ASC（与默认方向相反，才能证明是「跟参数走」而不是「恒降序」）")
+    void pageHonoursAscendingSort() {
+        when(mapper.selectPage(any(), any())).thenReturn(emptyPage());
+        PageQuery query = new PageQuery();
+        query.setSort("createdAt,asc");
+
+        service.page(DOC, null, null, query);
+
+        String sql = capturedWrapperSql();
+        assertThat(sql).containsIgnoringCase("created_at ASC");
+        assertThat(sql).as("显式 asc 时不能再出现 created_at DESC（方向被写死成降序时这条红）")
+                .doesNotContainIgnoringCase("created_at DESC");
+        // 末尾的 id DESC 与主排序无关，恒在：它是同时间戳下的稳定兜底
+        assertThat(sql).containsIgnoringCase("id DESC");
+    }
+
+    /**
+     * 捕获 {@code page} 发出的 wrapper 的 SQL 段（列名与方向都在里面，不需要连库）。
+     *
+     * @return SQL 片段，形如 {@code ORDER BY created_at DESC,id DESC}
+     */
+    @SuppressWarnings("unchecked")
+    private String capturedWrapperSql() {
+        ArgumentCaptor<LambdaQueryWrapper<TestPoint>> captor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(mapper).selectPage(any(), captor.capture());
+        return captor.getValue().getSqlSegment();
+    }
+
+    /**
+     * 空分页结果（本类只关心 wrapper，不关心数据）。
+     *
+     * @return 分页对象
+     */
+    private static Page<TestPoint> emptyPage() {
+        Page<TestPoint> page = new Page<>(1, 20);
+        page.setRecords(List.of());
+        page.setTotal(0L);
+        return page;
     }
 }

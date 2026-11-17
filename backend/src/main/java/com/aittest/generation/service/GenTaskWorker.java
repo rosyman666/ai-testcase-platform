@@ -138,6 +138,11 @@ public class GenTaskWorker {
 
         long startNanos = System.nanoTime();
         ItemOutcome outcome;
+        // retryable=false 的模型失败（鉴权 / 参数 / 配额这类确定性错误）不许再退避重试：
+        // 同一个错误再问 3 遍不会变成成功，只会让任务晚 3 个退避周期才收敛。
+        // 默认 false —— 只有 LlmException 明确说"不可重试"时才置真，宽 catch 的未知异常
+        // 仍按原行为重试（那是"可能是瞬时故障"的正确假设）。
+        boolean permanentFailure = false;
         try {
             outcome = handler.execute(task, item);
         } catch (LlmException ex) {
@@ -149,8 +154,11 @@ public class GenTaskWorker {
             log.warn("[TASK] 子项模型调用失败 taskNo={} unitRef={} code={} retryable={} 原因={}",
                     task.getTaskNo(), item.getUnitRef(), ex.getErrorCode(), ex.isRetryable(),
                     ex.getMessage());
-            // 注意：这里**不**用 isRetryable() 短路重试。retryable=false 也照旧退避重试 3 次
-            // （动它会改掉 T06 既有 NEG 断言的 attempts 口径），本批只改错误码归属。
+            // D-45：isRetryable() 现在真的用于短路重试（此前只记日志、不参与决策）。
+            // 落点仍是 failPermanentlyWithOutcome（见下方条件分支）：它写 latency_ms，
+            // 而 failPermanently 不写——换成后者会让这批 item 的 latency_ms 退化成 0，
+            // 是一个只有对比指标看板才会发现的静默降级。
+            permanentFailure = !ex.isRetryable();
             outcome = ItemOutcome.failed(ex.getErrorCode().name(), ex.getMessage(), latency);
         } catch (Exception ex) {
             int latency = elapsedMs(startNanos);
@@ -164,7 +172,9 @@ public class GenTaskWorker {
             return completeItem(task, item, outcome);
         }
         int attempts = (item.getAttempts() == null ? 0 : item.getAttempts()) + 1;
-        if (attempts >= MAX_ATTEMPTS) {
+        // 两个让 item 直接进终态的理由，落点相同（都写 latency_ms，见 failPermanentlyWithOutcome）：
+        // ① 重试次数到顶；② 这次失败是确定性错误（retryable=false），重试结构上不可能翻盘。
+        if (attempts >= MAX_ATTEMPTS || permanentFailure) {
             return failPermanentlyWithOutcome(task, item, outcome, attempts);
         }
         // 退避后重试：退回 PENDING 并后移 next_run_at，**不 sleep**，也不是 item 终态
@@ -332,7 +342,14 @@ public class GenTaskWorker {
         TaskStatus terminal = TaskStateMachine.terminalOf(success + failed + skipped, success);
         // error_code / error_msg 是 NOT NULL 列，"无错误"用空串而不是 null：
         // 传 null 会被 MySQL 严格模式拒掉，异常又会被调度器的兜底 catch 吞成一条 ERROR 日志
-        String errorCode = failed > 0 ? "E_INTERNAL" : "";
+        // D-42：任务级 error_code 取**首个失败 item 的码**（按 id 升序的第一个），
+        // 取不到（无失败行 / 空串）再由 safeErrorCode 回退 E_INTERNAL。
+        // 不取"占比最高的码"：那要先定并列 tie-break 规则，是新增决策而不是修 bug。
+        // 仍写 E_INTERNAL 的话，"这批为什么失败"在任务行上永远是一句"内部错误"，
+        // 用户只能逐条点子项去翻——而那正是任务级字段存在的意义。
+        String errorCode = failed > 0
+                ? safeErrorCode(genTaskItemMapper.selectFirstFailedErrorCode(task.getId()))
+                : "";
         String errorMsg = failed > 0 ? ("有 " + failed + " 条子项失败") : "";
         int won = genTaskMapper.markTerminal(task.getId(), terminal.code(),
                 errorCode, errorMsg, LocalDateTime.now(ZoneOffset.UTC));

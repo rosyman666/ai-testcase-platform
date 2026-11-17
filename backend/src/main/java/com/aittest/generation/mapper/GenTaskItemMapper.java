@@ -71,6 +71,23 @@ public interface GenTaskItemMapper extends BaseMapper<GenTaskItem> {
                            @Param("errorMsg") String errorMsg);
 
     /**
+     * 取某任务下<b>首个</b>失败 item 的错误码（任务级 {@code error_code} 聚合用，D-42）。
+     *
+     * <p><b>为什么是"首个"而不是"占比最高的码"</b>：取众数要先定义并列时的 tie-break
+     * 规则（并列取哪个？按出现顺序还是按码字典序？），那是一个<b>新增决策</b>，
+     * 不是修一个 bug。按 {@code id} 升序取第一条的语义是确定的、可复现的，也足够回答
+     * "这批为什么挂"这个唯一要解决的问题。</p>
+     *
+     * <p>{@code ORDER BY id} 不是可选项：不加它 MySQL 返回哪一行不保证稳定，
+     * 同一个任务两次收尾可能得到不同的码——而任务级字段只写一次，写错了没有第二次机会。</p>
+     *
+     * @param taskId 任务
+     * @return 首个失败 item 的 {@code error_code}；没有失败行时返回 {@code null}
+     *         （调用方 {@code GenTaskWorker} 会把它兜底成 {@code E_INTERNAL}）
+     */
+    String selectFirstFailedErrorCode(@Param("taskId") Long taskId);
+
+    /**
      * 统计某任务下各状态的 item 数（进度聚合用，避免 N+1）。
      *
      * @param taskId 任务

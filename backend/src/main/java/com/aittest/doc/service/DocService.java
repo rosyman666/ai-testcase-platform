@@ -307,11 +307,20 @@ public class DocService {
      */
     public PageResult<ApiOperationVO> operations(Long docId, PageQuery query) {
         requireDoc(docId);
+        // seq_no 是文档里的自然顺序（章节 / 接口原序），**默认必须升序**。
+        // ① 不能写成裸的 query.isDesc()：MP 的 orderBy(condition, isAsc, column) 第二参是 isAsc，
+        //    直传 isDesc() 等于方向取反（§11.1 D-55 同族）；
+        // ② 也不能写成 !query.isDesc()：PageQuery 未指定 sort 时 isDesc() 返回 true（"最新在前"
+        //    的列表习惯），取反会把**默认**翻成降序，与同文件 sections() 的 orderByAsc(getSeqNo)
+        //    自相矛盾——那就从"用户显式排序无效"变成"默认顺序也是错的"，后者更糟。
+        // 所以显式区分三态：没传 sort → 升序；传了 asc → 升序；传了 desc → 降序。
+        String rawSort = query.getSort();
+        boolean explicitSort = rawSort != null && !rawSort.isBlank();
+        LambdaQueryWrapper<ApiOperation> wrapper = Wrappers.<ApiOperation>lambdaQuery()
+                .eq(ApiOperation::getDocId, docId)
+                .orderBy(true, !(explicitSort && query.isDesc()), ApiOperation::getSeqNo);
         Page<ApiOperation> page = new Page<>(query.pageOrDefault(), query.sizeOrDefault());
-        IPage<ApiOperation> result = apiOperationMapper.selectPage(page,
-                Wrappers.<ApiOperation>lambdaQuery()
-                        .eq(ApiOperation::getDocId, docId)
-                        .orderBy(true, query.isDesc(), ApiOperation::getSeqNo));
+        IPage<ApiOperation> result = apiOperationMapper.selectPage(page, wrapper);
         return PageResult.of(result.getRecords().stream().map(ApiOperationVO::fromList).toList(),
                 result.getTotal(), (int) result.getCurrent(), (int) result.getSize());
     }
@@ -723,12 +732,16 @@ public class DocService {
     private void applySort(LambdaQueryWrapper<DocSource> wrapper, PageQuery query) {
         String column = query.sortColumnOrDefault("created_at");
         boolean desc = query.isDesc();
+        // MP 的 orderBy(condition, isAsc, column) 第二参是 **isAsc** 不是 isDesc：
+        // 直接把 isDesc() 传进来会把方向整体翻转——点「降序」拿到升序，且不报错、类型也对，
+        // 只有在页面上肉眼比对"新文档排到最后一页"时才看得出来（§11.1 D-55）。
+        boolean isAsc = !desc;
         switch (column) {
-            case "updated_at" -> wrapper.orderBy(true, desc, DocSource::getUpdatedAt);
-            case "doc_no" -> wrapper.orderBy(true, desc, DocSource::getDocNo);
-            case "file_size" -> wrapper.orderBy(true, desc, DocSource::getFileSize);
-            case "parse_status" -> wrapper.orderBy(true, desc, DocSource::getParseStatus);
-            default -> wrapper.orderBy(true, desc, DocSource::getCreatedAt);
+            case "updated_at" -> wrapper.orderBy(true, isAsc, DocSource::getUpdatedAt);
+            case "doc_no" -> wrapper.orderBy(true, isAsc, DocSource::getDocNo);
+            case "file_size" -> wrapper.orderBy(true, isAsc, DocSource::getFileSize);
+            case "parse_status" -> wrapper.orderBy(true, isAsc, DocSource::getParseStatus);
+            default -> wrapper.orderBy(true, isAsc, DocSource::getCreatedAt);
         }
         // 同一时间戳（批量插入常见）下保持稳定顺序，便于翻页
         wrapper.orderByDesc(DocSource::getId);

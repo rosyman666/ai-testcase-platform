@@ -97,6 +97,20 @@ export default function CostChart({ from, to }: CostChartProps): JSX.Element {
     costMicro: Number(point.costMicro),
   }));
 
+  /**
+   * 空态判定的两条来源，文案必须分开。
+   *
+   * 只挡 `chartData.length === 0` 是不够的：`points` 非空而 `costMicro` 全为 0 时
+   * （本地 / mock 模型不计价就是这个形态），柱子高度为 0，图上是一片空白，
+   * 既没有轴标签也没有说明——用户会以为页面挂了，而不是"成本确实被记成了 0"。
+   */
+  const allZero = chartData.length > 0 && chartData.every((point) => point.costMicro === 0);
+  const showEmpty = !isLoading && !isError && (chartData.length === 0 || allZero);
+  /** 有 token 却没成本 → 指向总成本卡片里的成因；连 token 都没有 → 只是这个窗口没记录。 */
+  const emptyText = costZero
+    ? '调用记录存在但成本记为 0，成因见上方总成本卡片'
+    : '该窗口内没有成本记录';
+
   return (
     <Box className="space-y-4">
       <Box className="flex items-center gap-3">
@@ -159,8 +173,8 @@ export default function CostChart({ from, to }: CostChartProps): JSX.Element {
         title="成本分布"
         unit="严格 SUM(llm_call_log.cost_micro)，不现算"
         loading={isLoading}
-        empty={!isLoading && !isError && chartData.length === 0}
-        emptyText="该窗口内没有成本记录"
+        empty={showEmpty}
+        emptyText={emptyText}
       >
         {isError ? (
           <EmptyState

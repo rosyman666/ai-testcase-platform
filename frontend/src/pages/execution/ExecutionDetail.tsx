@@ -628,8 +628,26 @@ export default function ExecutionDetail(): JSX.Element {
                     className="cursor-pointer"
                     onClick={() => setSelectedResult(row)}
                   >
-                    <TableCell className="max-w-xs truncate">{row.className}</TableCell>
-                    <TableCell className="max-w-xs truncate">{row.caseName}</TableCell>
+                    <TableCell>
+                      {/*
+                        1280 宽下表格会横向溢出（内层 table 比容器宽 100+px），溢出的正好是
+                        右边的「映射到的用例 / 失败分类 / 归因来源」——T10 的核心价值列。
+                        截断宽度是溢出主因，所以这三列收窄到 200/220px；收窄后必须配 Tooltip，
+                        否则全名彻底看不到（失败信息那列本来就有 Tooltip）。
+                      */}
+                      <Tooltip title={row.className}>
+                        <Typography variant="body2" className="max-w-[200px] truncate">
+                          {row.className}
+                        </Typography>
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell>
+                      <Tooltip title={row.caseName}>
+                        <Typography variant="body2" className="max-w-[200px] truncate">
+                          {row.caseName}
+                        </Typography>
+                      </Tooltip>
+                    </TableCell>
                     <TableCell>
                       <StatusChip code={row.status} />
                     </TableCell>
@@ -637,7 +655,7 @@ export default function ExecutionDetail(): JSX.Element {
                     <TableCell>
                       {row.failureMessage ? (
                         <Tooltip title={row.failureMessage}>
-                          <Typography variant="body2" className="max-w-sm truncate">
+                          <Typography variant="body2" className="max-w-[220px] truncate">
                             {previewMessage(row.failureMessage)}
                           </Typography>
                         </Tooltip>

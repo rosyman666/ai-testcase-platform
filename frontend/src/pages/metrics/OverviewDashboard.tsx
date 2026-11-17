@@ -52,6 +52,15 @@ const SEVEN_DAYS_BACK = -6;
 const THIRTY_DAYS_BACK = -29;
 
 /**
+ * 4 个 Tab 的标签，顺序即 `tab` 的下标。
+ *
+ * 抽成常量是为了让 `Tab` 与 `role="tabpanel"` 的 id 都从**同一个下标**推导：
+ * 两边各手写一遍 `metrics-tab-0/1/2/3` 迟早会错一位，而错位后 `aria-controls`
+ * 指向一个不存在的 id——屏幕阅读器静默失效，肉眼完全看不出来。
+ */
+const TAB_LABELS = ['概览', '采纳趋势', '成本', '质量'] as const;
+
+/**
  * 把时间戳格式化成东八区民用日 `yyyy-MM-dd`。
  *
  * <p>实现：把时刻平移到 UTC+8 后取 UTC 年月日——恒定 +8h、不依赖
@@ -364,17 +373,37 @@ export default function OverviewDashboard(): JSX.Element {
         }
       />
 
-      <Tabs value={tab} onChange={(_event, next) => setTab(next)} className="mb-4">
-        <Tab label="概览" />
-        <Tab label="采纳趋势" />
-        <Tab label="成本" />
-        <Tab label="质量" />
+      {/*
+        a11y：`role="tab"` 若没有 `aria-controls` 指向真面板，屏幕阅读器读到四个 tab 却找不到
+        对应内容（QA 实测 `[role="tabpanel"]` 计数为 0）。**只给激活的那个包 panel**：
+        文件头注释写明「非激活 Tab 不挂载」是刻意的性能设计（质量页有 P1 性能问题），
+        所以 panel 只有 1 个，随 `tab` 换 id，而不是补齐四个。
+      */}
+      <Tabs
+        value={tab}
+        onChange={(_event, next) => setTab(next)}
+        className="mb-4"
+        aria-label="指标视图"
+      >
+        {TAB_LABELS.map((label, index) => (
+          <Tab
+            key={label}
+            id={`metrics-tab-${index}`}
+            // 只有已挂载的那个面板才存在可指向的目标；未选中的 Tab 若也写 `aria-controls`，
+            // 就是指向一个不存在的 id（`getElementById` 返回 null）——一个看起来完全正常、
+            // 实则没有目标的指针。懒挂载与"四个 panel 都在"互斥，所以只给激活项。
+            aria-controls={tab === index ? `metrics-tabpanel-${index}` : undefined}
+            label={label}
+          />
+        ))}
       </Tabs>
 
-      {tab === 0 && <OverviewPanel from={range.from} to={range.to} />}
-      {tab === 1 && <AcceptanceChart from={range.from} to={range.to} />}
-      {tab === 2 && <CostChart from={range.from} to={range.to} />}
-      {tab === 3 && <QualityPanel from={range.from} to={range.to} />}
+      <Box role="tabpanel" id={`metrics-tabpanel-${tab}`} aria-labelledby={`metrics-tab-${tab}`}>
+        {tab === 0 && <OverviewPanel from={range.from} to={range.to} />}
+        {tab === 1 && <AcceptanceChart from={range.from} to={range.to} />}
+        {tab === 2 && <CostChart from={range.from} to={range.to} />}
+        {tab === 3 && <QualityPanel from={range.from} to={range.to} />}
+      </Box>
     </Box>
   );
 }

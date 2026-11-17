@@ -633,7 +633,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 |---|---|---|
 | `Suspense` 边界**只放叶子**，`AppShell` 不包 `PageBoundary` | 否则任一页面 chunk 未就绪时整个壳（含侧栏顶栏）被替换成转圈，用户点一下菜单整页闪白 | 在壳上包一层统一兜底——省事但把「局部加载」放大成「整页重绘」 |
 | 壳内兜底高度用 `height:100%`，`/login` 保持 `minHeight:100vh` | `main` 是 `h-screen` flex 列里的 `flex-1 + min-h-0`，used height 确定，`100%` 能解析且与 `main` 等高 → 偏移 0。`/login` 父级是 `body`（无确定高度），`100%` 会塌成 0 | 统一用一个值——两边父级完全不同，统一必然有一边错 |
-| 解析状态**与三域并列**而非并入 `ALL_STATUS`（D-56） | 并入会让 `isStatusKey('PARSED')` 对任务/用例/执行结果三个域都返回 `true`，语义污染 | 塞进 `ALL_STATUS` 让 `StatusChip` 直接可用——一行代码换来三个域的判定失真 |
+| 解析状态**与三域并列**而非并入 `ALL_STATUS`（D-56） | 并入会让 `getStatusMeta('PARSED')` 命中、`StatusChip` 渲染成绿色「已解析」而非刻意保留的灰色裸码，三域并集被污染。**订正（2026-11-17）**：原写「会让 `isStatusKey('PARSED')` 对三个域都返回 `true`」——实测不成立，`isStatusKey` 的实现是 `code in STATUS_COLORS`（`theme.ts` 色板 12 键），与 `ALL_STATUS` 语义表是两条独立实现 | 塞进 `ALL_STATUS` 让 `StatusChip` 直接可用——一行代码换来三域的语义并集失真 |
 | `StatusChip` 去重放 module 级 `Set<string>` | `useRef` 是每实例一份，一屏 50 行脏状态就是 50 条 warn；被刷屏的护栏等于没有护栏 | `useRef` / 组件内 state |
 | 未知码**显示仍是裸 code** | 那是排障唯一的线索；换成「未知状态」等于把线索删掉让人去翻控制台 | 统一显示「未知状态」——界面干净了，问题变难查了 |
 | 告警**不放** `getStatusMeta()` | 它是纯查表函数，未知返回 `null` 是写进 `status.test.ts:74` 的契约；塞副作用会污染所有潜在消费者 | 在查表函数里打 warn——一次调用链会打出多条，且测试断言被打乱 |
@@ -780,6 +780,66 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **`junit_ref` 的提示语可再进一步**：重跑映射以库里当前编号为准这件事，是否要在确认框里明说"如果你重新导出过，旧结果文件会全部映射不上"，待用户眼验后定。
 - **`/executions` 的真浏览器量测**：本轮只做了 HTTP 级联调与 jsdom 测试，1280/1920 布局与饼图渲染未在真浏览器里量过。
 - 其余遗留同上一节（`/testpoints` 布局量测、`getParseStatusMeta` 未知码单测、`/metrics` 四 Tab 与导出弹窗眼验、`D-54` / `D-55`）。
+
+---
+
+## 2026-11-17 · 阶段 13 · 技术债清理（D-54 闭合 / D-55 修完 / D-56 判据订正 / 前端阻塞项）
+
+> 这一批不写新功能，只清遗留。结果发现**三个"遗留问题"里有两个的前提是假的**——
+> 妨碍修复的从来不是工作量，是我们自己写进文档、却从没核过的那句"改它会打破某处断言"。
+
+### 做了什么
+1. **`D-54` 确认闭合**：`4ae14fd` 已删掉 `Home.tsx` 的过渡期三个导航入口，`grep` 零命中；补上文档证据（原先 §11 只记了"实现做了更合理的事"，没写它已被删）。
+2. **`D-55` 五处全修完**（此前只修 2 处）：`DocService#applySort`（`740-744`）、`TestPointService#applySort`（`255-259`）改 `boolean isAsc = !desc`；**新发现第 5 处** `DocService#operations`（`315-321`）。补后端回归 7 例（`DocServiceTest` 5 + `TestPointServiceTest` 2）。
+3. **`D-64` 新登记（文档缺口，非实现缺陷）**：`sort` / `desc` 实际只在 4 个方法上生效，而 §4.2 的「分页入参」没限定范围。把范围写进契约，**实现一行未动**。
+4. **`getParseStatusMeta` 补 7 例直接单测**（`constants/__tests__/docStatus.test.ts`），`D-56` 登记的"未知码分支无直接单测"闭合。前端 138 → 145。
+5. **`MybatisPlusLambdaCache` 判据纠正 + 补注册 3 个实体**（`DocSource` / `TestPoint` / `ApiOperation`）。原 javadoc 称"mock 的实体不会触发列解析"——**列解析发生在 wrapper 构造时，与 mapper 是否被 mock 无关**。
+6. **前端四项**（真浏览器量测抓出来的）：`vite.config.ts` 加 `optimizeDeps.include` 治 dev server 中途崩溃（**17 条 = 13 个运行时依赖 + 4 个扫描器看不见的入口**，图标只列 barrel）；`/metrics` 的 Tab 补 `id`/`aria-controls`/`role="tabpanel"`/`aria-labelledby` 四件套，且 **`aria-controls` 只给激活项**；`CostChart` 补"有数据但全 0"的空态（两档文案）；执行明细表三列截断宽度收到 200/200/220px + 类名与方法名补 Tooltip。前端 145 → 148。
+7. **两处判据订正**（都是本轮变异/`grep` 证伪的）：§11 `D-56` 的「并入 `ALL_STATUS` 会让 `isStatusKey('PARSED')` 返回 true」、`D-55` 的「改了会翻转黑盒脚本断言」。三处文档（`01-architecture` / `JOURNAL` / `CHANGELOG`）逐处改准。
+8. **`D-45` / `D-42` 先做成本核算、再动手**：调研把「改 `D-45` 需同步修改的既有断言」核成 **0 处**（推翻了文档里的旧判据），两条都按核算结果实施——`isRetryable()` 接上短路重试（走 `failPermanentlyWithOutcome` 以保住 `latency_ms`）；任务级 `error_code` 改取首个失败 item 的码（新增一条 mapper 查询，回退仍是 `E_INTERNAL`）。
+
+### 关键决策与理由
+| 决策 | 理由 | 被否决的方案 |
+|---|---|---|
+| `operations()` 按**三态**区分：`explicitSort = sort != null && !sort.isBlank()`，`orderBy(true, !(explicitSort && query.isDesc()), ...)` | `seq_no` 是文档里的自然顺序，**默认必须升序**；而 `PageQuery.isDesc()` 未指定 `sort` 时返回 `true`（"最新在前"的列表习惯）。照抄同族的 `!desc` 会把**默认**翻成 DESC——从"用户显式排序无效"变成"默认顺序也是错的"，后者更糟 | 照抄 `!query.isDesc()`：与同文件 `sections()` 的 `orderByAsc(getSeqNo)` 自相矛盾 |
+| `operations()` 的 3 例**分别锁一种退化**，不追求"每例都能抓所有缺陷" | 三轮变异实测：A（`!isDesc()`，真实缺陷形态）只有第 1 例红；B（恒 DESC）第 1、2 例红；C（恒 ASC）只有第 3 例红。**三例的判别集互不重叠**，没有一例能单独覆盖全部——这比笼统说"3 道防线"精确，也说明第 2、3 例不是摆设 | 只写第 1 例（能抓真实缺陷）+ 两例形式覆盖：少 2 例，但"恒 DESC / 恒 ASC"两类退化从此无人拦 |
+| `D-64` 定为**文档缺口**而不是实现缺陷 | 核了三个方法的 javadoc：`results` 恒 `id ASC` 是因为同一次 `insertBatch` 的行 `created_at` 完全相同、按时间排等于随机顺序、翻页会重复/漏行；`runs` 的固定降序与 `sections` 的 `seq_no` 升序同理。**实现各自都对，缺的是这些理由只在 javadoc 里、不在接口契约里** | 给三个方法补 `sort` 分支：会把这个有理由的设计改坏，尤其 `results`——按时间排就把它刻意避开的翻页重复问题引回来 |
+| 图标深路径清单**不加**，只留 `include: ['@mui/icons-material']` | 冷启动后 `.vite/deps` 里已有 36 个 `@mui_icons-material_*`（含 `_ArrowBackRounded`/`_EditRounded`），证明预构建 barrel 时深路径已一并登记。原判断"barrel 覆盖不到深路径"是推理，`ls` 否掉它 | 硬写 18 个图标路径 + 一条"新增图标须同步加清单"的注释：堆一堆用不上的条目，还给后来人留一条假的隐式约定 |
+| Tab 的 `role="tabpanel"` **只挂 1 个**（随 `tab` 换 id），不为补齐 a11y 渲染 4 个 | 文件头注释写明"非激活 Tab 不挂载"是刻意的性能设计（质量页有 P1 问题）。补 a11y 不能顺手把首屏成本拉回去 | 四个面板都渲染、用 `hidden` 切换：a11y 更"标准"，但把 P1 拖回首屏 |
+| 成本空态按 `costZero` **分两档文案** | 「有调用、成本记 0」（mock 模型单价 0/0，token 非 0）与「窗口内没有调用」（token 也为 0）是两件事，一句"暂无数据"会把前者说成"没调用"，而成本卡片明明写着有 token。前者指向"成因见上方卡片"，后者才是真的空 | 统一一句"暂无成本数据"：省一条分支，让"配置问题"看起来像"没数据" |
+| `D-42` 取**首个**失败 item 的码，不取"占比最高" | 占比最高要额外定并列 tie-break 规则——**现有代码与文档都没有这条规则**，那是一次新增决策，不是修 bug。首个按 `id` 升序，语义确定、可解释 | 取占比最高：统计上更"代表"，但并列时取谁无定义，等于把一个未定决策塞进一次修复 |
+| `D-42` **先改实现再逐条补 stub**，并用"改回硬编码必须有用例红"验收 | Mockito 对未 stub 的返回 `String` 方法给 `null`，`safeErrorCode` 回退 `E_INTERNAL`——**7 条硬编码断言一条都不会红**。这种"改了但测试不红"比不改更危险：它会让人相信已经改好了 | 只改实现、不改断言：测试全绿，功能半生不熟 |
+| 前端 `tsc` 与 `vitest` **两只脚都要踩** | `vitest` 用 esbuild 剥类型、不做类型检查；本轮又一次出现"测试全绿但类型有错"的形态。且 `tsc` 输出经管道传给 `tail` 之后拿到的退出码是 `tail` 的 | 只跑测试：类型错误一路带到运行时 |
+
+### 踩坑记录
+- **改动未提交时，不能用 `git checkout -- <file>` 撤变异探针**：它会把**整批未提交的修复**一起回滚到 HEAD，而且发生在全量测试之前——等于先把工作删掉再验证。固定做法是变异前 `cp` 备份、跑完覆盖还原，以"备份与还原后 md5 一致 + 全量测试回到基线"两道校验收口。这条是后端反驳我之后定下的，**我给的指令是错的**。
+- **三次"编造的成本"，三次都被 `grep` 证伪**。`D-55` 写"改了会翻转黑盒脚本的列表顺序断言"→ 实测脚本对 `/api/docs`、`/api/testpoints` 只有 `POST`、`sort=` 零出现、读表一律直连 MySQL 且写死 `LIMIT 1`；`D-56` 写"并入 `ALL_STATUS` 会让 `isStatusKey('PARSED')` 返回 true"→ 实测 `isStatusKey` 查的是 `theme.ts` 的 `STATUS_COLORS` 色板，与语义表是两条独立实现；`D-45` 写"`attempts=3` 被 NEG-2a 与 t07degrade D 段共同锁住"→ 实测 NEG-2a 没有 attempts 断言、t07degrade D 段走的是 `retryable=true` 的 mock。**三次都是把一个没核过的成本写成事实，而三次都恰好把真问题挡在门外。**更麻烦的是**同一个判断会散落在多处文档**：`D-45` 那句「两处断言互锁」同时出现在 `CHANGELOG` 的 Known Issues、§11.1 的偏差行、§12 的前置条件表里，三处措辞还不一样——改的时候必须**逐处核、逐处改**，漏掉一处就留一条错误的判据在下游继续误导人（本轮 §12 那行就是最后一个被揪出来的）。纪律：凡写"会影响某处验收"，先 `grep`，再写；改判据时，`grep` 关键词把所有落点列全再动。
+- **一条形似严谨的推理，可能把两条独立实现当成同一条**：`isStatusKey`（查色板）与 `getStatusMeta`（查语义表）本是两回事。把 `PARSED` 塞回 `ALL_STATUS` 实测后，`isStatusKey('PARSED')` 仍是绿、**只有 `getStatusMeta === null` 变红**。测试里那条 `isStatusKey` 断言今天成立，但**不承重**——真正的护栏是 `getStatusMeta` 返回 null 与 `ALL_STATUS` 属性断言。
+- **引用了一个不存在的符号**：我在 `CHANGELOG` 里写"`operations` 三例共用一具 `baseNoSort()` 夹具"，实际代码是直接传 `new PageQuery()`、没有辅助方法。这类错误最难被后来人发现——他们只会去 `grep` 一个不存在的符号，找不到，然后怀疑自己。
+- **jsdom 没有布局，所以在 jsdom 里断言 recharts 的"柱子出现了"必然是假绿**：`ResponsiveContainer` 量到 0×0 就不渲染内部图表，"有数据"与"没数据"在 DOM 上几乎一样。修法是 `vi.mock('recharts')`、断言"柱图组件是否挂载"，且**故意不 mock `ChartCard`**（`D-53` 要求它不 import recharts）——mock 到图表库边界为止，`empty`/`emptyText` 的分支逻辑才真的被跑到。
+- **`curl` 不执行 JS，它证明不了懒加载路线**：`curl localhost:5173/executions` 拿到的是 `index.html`，JS 一行没跑，依赖解析根本没发生。要验"运行期会不会发现新依赖"，只能真浏览器导航。这不是严谨度问题，是**信号能力边界**问题——用错信号会得出"已经好了"的假结论。
+- **两种"dev server 没了"必须分开判**：真崩溃日志里有 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] … deps_temp_ad265770` 完整栈、`.vite` 留下 `deps_temp_*` 残骸、由首次导航触发；而**进程被回收**是日志在 `ready in …` 之后一个字都没有、`.vite` 里只有 `deps`、与导航无关。把后者写成"修复没生效"，会去改一个已经修好的东西。
+- **`orderBy(true, ...)` 的第二参是 `isAsc`**：`D-55` 修完后做了一次全量核算——21 处 `orderBy(true,` 里 20 处是同一个 `isAsc` 变量、1 处是三态表达式，`orderBy(true, true/false,` **零命中**，`isAsc` 常量赋值**零命中**，`orderByDesc` 6 处全是刻意的固定降序。**"5 处修了"不等于"21 处都对"**，而后者才是能交付的结论。
+- **同一个机制，我连续判错两次，都是被测的人用变异翻过来的**：先说「`@mui/icons-material` 是 barrel，深路径子路径预声明 barrel 覆盖不到」→ 冷启动后 `.vite/deps` 里 36 个图标产物否掉它；改口说「那清单不必加，别往配置里堆」→ 对方**把 18 条从 include 里滤掉再冷启动**，`_EditRounded.js` 照样被扫进 `deps`，说明图标清单在冷启动下**确实是冗余的**。最终口径才落准：**`include` 里承重的是 `@mui/icons-material` 这条 barrel**——预构建 barrel 会把深路径一并登记，所以 18 条深路径是冗余的。关键在于那次变异的**控制变量**：它保留着 barrel，所以它证明的是"barrel 进了 include，深路径就跟着进来"，不是"图标条目无所谓"。由此得到一条可执行的判据：**只列扫描器看不见的入口**（编译器注入的 `react/jsx-runtime`、插件按子路径引的 `@mui/material/styles`、`package.json` 顶层依赖），源码里显式 `import` 的东西交给扫描器。18 条图标因此被删掉，连带删掉那条"新增图标须同步加清单"的维护约定——它从前提上就不成立。<br/>教训：**"这个机制大概是这样"不能进结论**，凡涉及框架行为，要么查文档要么变异；而**变异要看清控制变量**，"滤掉 A 之后现象没变"只说明 A 不承重，不说明 A 所属的那一类都不承重。
+- **因果链要能"按需复现"才算证到**：对方最后做的一件事——放一个 import 全仓无引用的 `@mui/icons-material/Settings` 的探针模块，请求它 → `.vite` 下冒出 `deps_temp_*` → 再请求一次 → 日志打出 `new dependencies optimized: @mui/icons-material/Settings`。**复现出的包与原始崩溃日志里的 `ArrowBackRounded, EditRounded` 不是同一批**，这恰好把结论从"某几个特定图标有问题"提升到"**首次 resolve 一个不在缓存里的依赖**这个机制本身"。能被按需复现的失败，才算被理解。
+- **"改了但测试不红"比不改更危险**：`D-42` 把任务级 `error_code` 改成查库后，现有 7 条硬编码 `E_INTERNAL` 的断言**一条都不会红**——Mockito 对未 stub 的 `String` 方法返回 `null`，`safeErrorCode` 回退 `E_INTERNAL`，**与旧断言同值**。如果只跑一遍看到"全绿"就收工，功能会以半生不熟的状态交付，而测试还在替它作证。处置必须是「先改实现 → 逐条补 stub → 再变异验证（退回硬编码必须有用例红）」，三步缺一不可。
+- **提交前逐条看 `??` 项不是形式**：`git status` 里躺着三个自称"用完即删"的临时文件（`__probe_icon.ts`、`vite.verify.config.ts`、`vite.verify.mutation.config.ts`），其中一个会被一起带进 `commit`——一个全仓无引用的探针文件躺在 `src/` 里，还 import 了一个没用的图标。**是后端顺手提醒了一句才发现的**，单看自己的 diff 永远看不见别人的未跟踪文件。
+- **`D-63` 的教训在这一批又被验证一次**：`MybatisPlusLambdaCache` 少注册一个实体，表现是"单跑某个测试类绿、全量跑红"。这类"只在全量下红"的失败最容易被当成 flaky 忽略掉。
+
+### 验收事实（2026-11-17）
+- **后端**：`mvn test` **341 / 0 fail / 0 error / 7 skipped**（清理前基线 332；本轮 +9：排序回归 7 + `D-45` 1 + `D-42` 1；7 skipped 仍是 `IdGenSeedingTest` 需真库）。
+- **`D-45` 变异（M1）**：条件退回 `attempts >= MAX_ATTEMPTS` → `nonRetryableLlmFailureGoesPermanentImmediately` 红在 `never()).rescheduleForRetry(...)`，捕获参数 `attempts=1`；其余 20 例绿。
+- **`D-42` 变异（M2）**：`error_code` 退回硬编码 → **6 例红**（`allFailedTaskStillFinalizes:374` / `expiredTaskConverges…:534` / `finalizeWithFailuresWritesChineseError:213` / `llmExceptionKeepsItsErrorCodeOnPermanentFailure:613` / `nonRetryableLlmFailureGoesPermanentImmediately:671` / `taskErrorCodeTakesFirstFailedItemCode:236`）。**改之前不补 stub 的话，这一变异一条都不会红**——假绿已消除。
+- **前端**：`tsc --noEmit` 0 错；单 fork **18 files / 148 tests**（本轮起点 138）。
+- **`orderBy` 全量核算**：`grep -rn "orderBy(true," backend/src/main/java` → **21 行**；`orderBy(true, query.isDesc(` → **0 处**；`orderBy(true, true/false,` → **0 处**。
+- **`D-55` 变异矩阵**：A（`!query.isDesc()`）→ 第 1 例红；B（恒 DESC）→ 第 1、2 例红；C（恒 ASC）→ 第 3 例红。三格全部实测，无推断。
+- **前端冷启动**：清掉 `node_modules/.vite` → `ready in 585 ms` → 五条路由全 200 → `.vite/` 只有 `deps`、**无 `deps_temp_*`** → `deps` 366 个文件、含 36 个 `@mui_icons-material_*`。
+- **`grep` 证据**：`grep -rn "PARSE_STATUS_META\["` 仍为 1（只剩函数本体）；`grep -rn "MUTATION-PROBE" backend/src` → 0 处。
+
+### 下一步
+- **`D-65`（`D-45` 的覆盖边界，已登记）**：`ItemOutcome`（`TaskItemHandler:83-85`）没有 `retryable` 字段，`TestPointExtractService.safeExtract`（`:282-289`）在 service 层就把异常转成了结果对象，所以异常只有 `CASE_GENERATE` 一条链路能到达 `GenTaskWorker`——**抽点链路仍会重试满 3 次**。修它要给 `ItemOutcome` 加**可空** `Boolean retryable`（**不能用基本类型**，否则所有既有 `ItemOutcome.failed(...)` 调用点默认成 `false`，等于把所有失败一次性变成永不重试）。
+- **`D-46`（few-shot 活性探针判别力不足）、`D-33`（`Clock` 未注入）、`D-36`（`test_point` 并发死锁）** 仍是观测项，建议单独开批。
+- **`D-64` 的实现侧**：`results` 的排序能力留待真有需求时再补，届时须同时改 §4.2 清单与 `D-64` 本条。
 
 ---
 

@@ -152,9 +152,15 @@ cd frontend && npm install && npm run dev    # http://localhost:5173，/api 已�
 
 > 这份文档的边界条款是刻意写具体的（例如「第 5 次失败时应当即返回锁定提示，而不是等到第 6 次」「新密码不得与最近 3 次使用过的历史密码重复」），用来观察抽取结果有没有抓住边界，而不是只把主流程复述一遍。换成别的文档时，把上面三行的数字按实际结果改掉再看。
 
+### 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| `npm run dev` 报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`，或启动后进程无声退出（`curl` 先 200 后 000） | 本机 shell 可能给 `NODE_OPTIONS` 注入了批量删除护栏，Vite 重做依赖预构建时要清空 `node_modules/.vite/deps_temp_*` 被拦下并退出进程。用 `NODE_OPTIONS= npm run dev` 启动即可；`vite.config.ts` 已用 `optimizeDeps.include` 预声明懒加载路由才会解析到的依赖，正常情况下不会再触发重优化 |
+
 ## 主要端点
 
-共 43 个端点，覆盖 11 个 Controller。几个核心的：
+共 49 个端点，覆盖 12 个 Controller。几个核心的：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

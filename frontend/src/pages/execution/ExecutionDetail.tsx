@@ -607,7 +607,7 @@ export default function ExecutionDetail(): JSX.Element {
       ) : (
         <>
           <TableContainer component={Paper}>
-            <Table size="small">
+            <Table size="small" sx={{ '& .MuiTableCell-root': { px: 1 } }}>
               <TableHead>
                 <TableRow>
                   <TableCell>类名</TableCell>
@@ -630,20 +630,26 @@ export default function ExecutionDetail(): JSX.Element {
                   >
                     <TableCell>
                       {/*
-                        1280 宽下表格会横向溢出（内层 table 比容器宽 100+px），溢出的正好是
-                        右边的「映射到的用例 / 失败分类 / 归因来源」——T10 的核心价值列。
-                        截断宽度是溢出主因，所以这三列收窄到 200/220px；收窄后必须配 Tooltip，
-                        否则全名彻底看不到（失败信息那列本来就有 Tooltip）。
+                        1280 宽下容器只有 982px，8 列在默认内边距下要 1057px——溢出的正好是右边
+                        「映射到的用例 / 失败分类 / 归因来源」三列（T10 的核心价值列）。只收内容
+                        宽度治不了：收到 200/200/220 后实测仍溢出 75px，「归因来源」整列落在可视区外。
+                        所以按预算分配，任一项变动都要重算：
+                          内边距：单元 8px×2（`px: 1`），比默认 16px×2 省 128px（8 列）
+                          文本列上限：类名 180 / 方法名 110 / 失败信息 150 / 映射到的用例 120
+                          固定列内容宽（默认内边距下实测 84/76/78/46，减 32）：状态 52、耗时 44、
+                            失败分类 46（带纠正按钮按 80 估）、归因 14（"已人工" Chip 按 64 估）
+                          最坏合计 ≈ 16×8 + 180+110+150+120 + 52+44+80+64 ≈ 928 ≤ 982
+                        截断必须配 Tooltip，否则全名彻底看不到（失败信息、类名、方法名、用例号都配了）。
                       */}
                       <Tooltip title={row.className}>
-                        <Typography variant="body2" className="max-w-[200px] truncate">
+                        <Typography variant="body2" className="max-w-[180px] truncate">
                           {row.className}
                         </Typography>
                       </Tooltip>
                     </TableCell>
                     <TableCell>
                       <Tooltip title={row.caseName}>
-                        <Typography variant="body2" className="max-w-[200px] truncate">
+                        <Typography variant="body2" className="max-w-[110px] truncate">
                           {row.caseName}
                         </Typography>
                       </Tooltip>
@@ -655,7 +661,7 @@ export default function ExecutionDetail(): JSX.Element {
                     <TableCell>
                       {row.failureMessage ? (
                         <Tooltip title={row.failureMessage}>
-                          <Typography variant="body2" className="max-w-[220px] truncate">
+                          <Typography variant="body2" className="max-w-[150px] truncate">
                             {previewMessage(row.failureMessage)}
                           </Typography>
                         </Tooltip>
@@ -667,7 +673,11 @@ export default function ExecutionDetail(): JSX.Element {
                     </TableCell>
                     <TableCell>
                       {row.caseId ? (
-                        <Typography variant="body2">用例 #{row.caseId}</Typography>
+                        <Tooltip title={`用例 #${row.caseId}`}>
+                          <Typography variant="body2" className="max-w-[120px] truncate">
+                            用例 #{row.caseId}
+                          </Typography>
+                        </Tooltip>
                       ) : (
                         <Typography variant="body2" color="text.secondary">
                           未映射

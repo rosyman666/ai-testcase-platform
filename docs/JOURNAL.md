@@ -794,7 +794,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 3. **`D-64` 新登记（文档缺口，非实现缺陷）**：`sort` / `desc` 实际只在 4 个方法上生效，而 §4.2 的「分页入参」没限定范围。把范围写进契约，**实现一行未动**。
 4. **`getParseStatusMeta` 补 7 例直接单测**（`constants/__tests__/docStatus.test.ts`），`D-56` 登记的"未知码分支无直接单测"闭合。前端 138 → 145。
 5. **`MybatisPlusLambdaCache` 判据纠正 + 补注册 3 个实体**（`DocSource` / `TestPoint` / `ApiOperation`）。原 javadoc 称"mock 的实体不会触发列解析"——**列解析发生在 wrapper 构造时，与 mapper 是否被 mock 无关**。
-6. **前端四项**（真浏览器量测抓出来的）：`vite.config.ts` 加 `optimizeDeps.include` 治 dev server 中途崩溃（**17 条 = 13 个运行时依赖 + 4 个扫描器看不见的入口**，图标只列 barrel）；`/metrics` 的 Tab 补 `id`/`aria-controls`/`role="tabpanel"`/`aria-labelledby` 四件套，且 **`aria-controls` 只给激活项**；`CostChart` 补"有数据但全 0"的空态（两档文案）；执行明细表三列截断宽度收到 200/200/220px + 类名与方法名补 Tooltip。前端 145 → 148。
+6. **前端四项**（真浏览器量测抓出来的）：`vite.config.ts` 加 `optimizeDeps.include` 治 dev server 中途崩溃（**17 条 = 13 个运行时依赖 + 4 个扫描器看不见的入口**，图标只列 barrel）；`/metrics` 的 Tab 补 `id`/`aria-controls`/`role="tabpanel"`/`aria-labelledby` 四件套，且 **`aria-controls` 只给激活项**；`CostChart` 补"有数据但全 0"的空态（两档文案）；执行明细表溢出按预算重做：**第一轮只收内容宽度（200/200/220）仍溢出 75px**，第二轮把内边距收到 8px 并按 180/110/150/120 分配后实测归零（982/982）；前端 145 → 148。
 7. **两处判据订正**（都是本轮变异/`grep` 证伪的）：§11 `D-56` 的「并入 `ALL_STATUS` 会让 `isStatusKey('PARSED')` 返回 true」、`D-55` 的「改了会翻转黑盒脚本断言」。三处文档（`01-architecture` / `JOURNAL` / `CHANGELOG`）逐处改准。
 8. **`D-45` / `D-42` 先做成本核算、再动手**：调研把「改 `D-45` 需同步修改的既有断言」核成 **0 处**（推翻了文档里的旧判据），两条都按核算结果实施——`isRetryable()` 接上短路重试（走 `failPermanentlyWithOutcome` 以保住 `latency_ms`）；任务级 `error_code` 改取首个失败 item 的码（新增一条 mapper 查询，回退仍是 `E_INTERNAL`）。
 
@@ -825,6 +825,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **"改了但测试不红"比不改更危险**：`D-42` 把任务级 `error_code` 改成查库后，现有 7 条硬编码 `E_INTERNAL` 的断言**一条都不会红**——Mockito 对未 stub 的 `String` 方法返回 `null`，`safeErrorCode` 回退 `E_INTERNAL`，**与旧断言同值**。如果只跑一遍看到"全绿"就收工，功能会以半生不熟的状态交付，而测试还在替它作证。处置必须是「先改实现 → 逐条补 stub → 再变异验证（退回硬编码必须有用例红）」，三步缺一不可。
 - **提交前逐条看 `??` 项不是形式**：`git status` 里躺着三个自称"用完即删"的临时文件（`__probe_icon.ts`、`vite.verify.config.ts`、`vite.verify.mutation.config.ts`），其中一个会被一起带进 `commit`——一个全仓无引用的探针文件躺在 `src/` 里，还 import 了一个没用的图标。**是后端顺手提醒了一句才发现的**，单看自己的 diff 永远看不见别人的未跟踪文件。
 - **`D-63` 的教训在这一批又被验证一次**：`MybatisPlusLambdaCache` 少注册一个实体，表现是"单跑某个测试类绿、全量跑红"。这类"只在全量下红"的失败最容易被当成 flaky 忽略掉。
+- **「收窄了」不等于「修好了」——溢出从 166 降到 75 仍判不通过**：第一轮只把三个文本列 320/384 → 200/220，实测 1057 vs 容器 982，最右列 `right=1321` 整列还在容器外。原因是 8 列在 1280 容器里的 min-content 本身就是 1057px，逐列微调改的是"超多少"而不是"超不超"。第二轮先算预算再动手（内边距省 128px + 各列上限，最坏 928 ≤ 982）才归零。判据因此定死：**看 `scrollWidth - clientWidth == 0` 与每列 `right <= 容器右边界`，不看"比原来小了多少"**。附带一条：`Chip` / `IconButton` 不参与 `truncate`，只给文本加 `max-w` 的改法必须补测 `td.scrollWidth == td.clientWidth`，否则内容顶破单元格而那一格看起来"没溢出"。
 
 ### 验收事实（2026-11-17）
 - **后端**：`mvn test` **341 / 0 fail / 0 error / 7 skipped**（清理前基线 332；本轮 +9：排序回归 7 + `D-45` 1 + `D-42` 1；7 skipped 仍是 `IdGenSeedingTest` 需真库）。
@@ -834,6 +835,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **`orderBy` 全量核算**：`grep -rn "orderBy(true," backend/src/main/java` → **21 行**；`orderBy(true, query.isDesc(` → **0 处**；`orderBy(true, true/false,` → **0 处**。
 - **`D-55` 变异矩阵**：A（`!query.isDesc()`）→ 第 1 例红；B（恒 DESC）→ 第 1、2 例红；C（恒 ASC）→ 第 3 例红。三格全部实测，无推断。
 - **前端冷启动**：清掉 `node_modules/.vite` → `ready in 585 ms` → 五条路由全 200 → `.vite/` 只有 `deps`、**无 `deps_temp_*`** → `deps` 366 个文件、含 36 个 `@mui_icons-material_*`。
+- **1280 明细表溢出实测（两轮）**：改前 `table` 1057 / 容器 982 / 溢出 **75**（原始缺陷 166）；按预算重做后 `982 / 982 / **0**`。三列 `right` = 映射到的用例 1049、失败分类 1165、归因来源 1246（容器右边界 1246，三列全在可视区内）；8 行 × 8 格 `td.scrollWidth == td.clientWidth` 无顶破。同次量测：`/metrics` 的 `[role="tabpanel"]` 计数四次点击恒为 **1**，每次激活 Tab 的 `aria-controls` 都能 `getElementById` 解析到。
 - **`grep` 证据**：`grep -rn "PARSE_STATUS_META\["` 仍为 1（只剩函数本体）；`grep -rn "MUTATION-PROBE" backend/src` → 0 处。
 
 ### 下一步

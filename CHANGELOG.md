@@ -128,5 +128,6 @@
 
 ### Known Issues
 
+- **抽点链路把真实错误码压成 `E_LLM_UPSTREAM`**（`D-66`，**已登记、本轮不改代码**）：`TestPointExtractService.safeExtract` 把 `LlmException` 转成 `TestPointExtractResult.error` 时只带中文原因，`ex.getErrorCode()` 到此为止，`TestPointExtractHandler` 的失败分支于是固定写 `E_LLM_UPSTREAM`。后果是**排障粒度**而非功能：`llm_call_log` 里仍有原始码，但对外的 `gen_task_item.error_code` 与任务级码一律 `E_LLM_UPSTREAM`，"上游 5xx"与"模型输出不合 schema"在页面上长得一样。与 `D-42` / `D-44` 同族（码在传递中丢失），`D-65` 修的是 `retryable`——它有 `UnitOutcome`/`UnitResult` 两个载体，错误码没有。**为什么不当场修**：要同时动 `TestPointExtractResult.error` 的语义（牵 `D-28` 对外契约）、handler 落码、`t06`/`t07` 里按 `E_LLM_UPSTREAM` 写的断言，三处不同步会出现"后端改了、脚本红、页面文案变裸码"
 - **`Clock` 未注入，§6 T06 ⑧⑨⑩ 未闭合**（`D-33`，**仍开放**）：`nowUtc` 由 `LocalDateTime.now(ZoneOffset.UTC)` 硬取、**无 `Clock` bean**；`AuditMetaObjectHandler` 与 `IdGen` 均未共用同一个 `Clock`，"`next_run_at` 断言**等于**注入的时钟"这条确定性断言因此不可用；`deadline_at` 只写不读、无超时扫描器；`frontend/src/api/{task.ts,sse.ts}` 与 `hooks/useTaskStream.ts` 三个前端 SSE 文件仍未交付（T07-3）
 - **`INSERT INTO test_point` 的并发死锁**（`D-36`，**观测项、未专门处理**）：修复 `D-34` 后实例里仍有 **3 次** `Deadlock found` 落在 `INSERT INTO test_point`（多 worker 并发为同一文档写测试点），由 item 级 `attempts` 重试吸收，**未观察到任务失败或 item 卡住**。列表为观测项，**不写成"已解决"**。若后续要治，方向是给 `test_point` 插入加重试或按 `doc` 串行化

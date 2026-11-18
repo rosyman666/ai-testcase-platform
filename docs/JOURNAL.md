@@ -881,7 +881,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 ### 下一步
 
-- **候选登记（尚无编号）**：抽点链路把 `E_LLM_PARSE_EXHAUSTED` / `E_SCHEMA_INVALID` 等真实码压成 `E_LLM_UPSTREAM`，与 `D-42`（任务级）/`D-44`（item 级）是同一族"码在传递中丢失"。透传要动 `t06`/`t07` 黑盒断言，需单独一批。
+- **已登记为 `D-66`（2026-11-18，只登记、不改代码）**：抽点链路把 `E_LLM_PARSE_EXHAUSTED` / `E_SCHEMA_INVALID` 等真实码压成 `E_LLM_UPSTREAM`，与 `D-42`（任务级）/`D-44`（item 级）是同一族"码在传递中丢失"。与 `D-65` 的差别说清楚：`retryable` 有 `UnitOutcome`/`UnitResult` 两个新载体可走，**错误码没有**——它在 `safeExtract` 转结果那一刻就没了。登记时明确「不顺手改」：修它要同时动 `TestPointExtractResult.error` 的语义（牵 `D-28` 对外契约）、handler 落码、`t06`/`t07` 里按 `E_LLM_UPSTREAM` 写的断言，三处不同步会出现"后端改了、脚本红、页面文案变裸码"。
 - **`D-46`（few-shot 探针判别力）、`D-33`（`Clock` 未注入）、`D-36`（`test_point` 并发死锁）** 仍是观测项，未动。
 - **`D-64` 的实现侧**：`results` 的排序能力留待真有需求时再补。
 

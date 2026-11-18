@@ -836,6 +836,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 - **`D-55` 变异矩阵**：A（`!query.isDesc()`）→ 第 1 例红；B（恒 DESC）→ 第 1、2 例红；C（恒 ASC）→ 第 3 例红。三格全部实测，无推断。
 - **前端冷启动**：清掉 `node_modules/.vite` → `ready in 585 ms` → 五条路由全 200 → `.vite/` 只有 `deps`、**无 `deps_temp_*`** → `deps` 366 个文件、含 36 个 `@mui_icons-material_*`。
 - **1280 明细表溢出实测（两轮）**：改前 `table` 1057 / 容器 982 / 溢出 **75**（原始缺陷 166）；按预算重做后 `982 / 982 / **0**`。三列 `right` = 映射到的用例 1049、失败分类 1165、归因来源 1246（容器右边界 1246，三列全在可视区内）；8 行 × 8 格 `td.scrollWidth == td.clientWidth` 无顶破。同次量测：`/metrics` 的 `[role="tabpanel"]` 计数四次点击恒为 **1**，每次激活 Tab 的 `aria-controls` 都能 `getElementById` 解析到。
+- **成本全 0 空态的「真实数据档」未验，且复现门槛比想象的高**：本批只验到「有数据且成本非 0」的回归（拦截 `/api/metrics/cost`，总成本 1.77 元、柱图挂载、两档空态文案均不出现）。「有 token 但 `costMicro` 全 0」这一档要复现，除了重新导入 JUnit XML 造出量测批次并起 8080，**还必须让 `llm_call_log` 里有 `cost_micro=0` 且有 token 的行**——只有执行批次而没有调用台账时，`costZeroReasons` 是空数组，页面上那档「调用记录存在但成本记为 0」不会出现，**很容易被误判成修复没生效**。量测批次 `R20261117-000001` 已在清库时删除，故本档记「未验」而非 PASS/FAIL。
 - **`grep` 证据**：`grep -rn "PARSE_STATUS_META\["` 仍为 1（只剩函数本体）；`grep -rn "MUTATION-PROBE" backend/src` → 0 处。
 
 ### 下一步

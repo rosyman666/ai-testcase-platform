@@ -79,28 +79,62 @@ public interface TaskItemHandler {
      * @param latencyMs       耗时（毫秒）
      * @param errorCode       失败错误码（成功为 {@code null}）
      * @param errorMsg        面向用户的中文失败原因（成功为 {@code null}）
+     * @param retryable       <b>三态</b>：{@code null} = 未表态（沿用 {@code MAX_ATTEMPTS}
+     *                        次数上限）、{@code FALSE} = 确定性错误不必重试、
+     *                        {@code TRUE} = 明确可重试。
+     *                        <p><b>为什么必须是包装类型 {@code Boolean} 而不是 {@code boolean}</b>：
+     *                        本 record 的 {@code failed(...)} 有十几个既有调用点，基本类型会把它们
+     *                        一次性默认成 {@code false}，等于把所有失败改成"永不重试"——
+     *                        一次没有任何编译错误、只在线上表现为"失败不再自愈"的静默行为变更。
+     *                        用 {@code null} 表达"这条链路没有对可重试性表态"，才保得住既有语义。</p>
+     *                        <p><b>为什么需要它</b>：{@code LlmException} 只有抛到
+     *                        {@code GenTaskWorker} 才能被认出来；抽取链路在 service 层就把异常
+     *                        转成了失败结果，异常的 {@code retryable} 会在那一刻丢失（D-65）。</p>
      */
     record ItemOutcome(boolean success, int produced, int degraded,
                        int promptTokens, int completionTokens, long costMicro, int latencyMs,
-                       String errorCode, String errorMsg) {
+                       String errorCode, String errorMsg, Boolean retryable) {
 
         /** 成功结果。 */
         public static ItemOutcome ok(int produced, int promptTokens, int completionTokens,
                                      long costMicro, int latencyMs) {
             return new ItemOutcome(true, produced, 0, promptTokens, completionTokens,
-                    costMicro, latencyMs, null, null);
+                    costMicro, latencyMs, null, null, null);
         }
 
         /** 走了降级的成功结果（产出可信度打折）。 */
         public static ItemOutcome degraded(int produced, int promptTokens, int completionTokens,
                                            long costMicro, int latencyMs) {
             return new ItemOutcome(true, produced, 1, promptTokens, completionTokens,
-                    costMicro, latencyMs, null, null);
+                    costMicro, latencyMs, null, null, null);
         }
 
-        /** 预期内的失败（<b>不抛异常</b>，由 worker 记账并决定是否重试）。 */
+        /**
+         * 预期内的失败（<b>不抛异常</b>，由 worker 记账并决定是否重试）。
+         *
+         * <p>{@code retryable = null}：调用方没有对可重试性表态，worker 沿用次数上限。</p>
+         */
         public static ItemOutcome failed(String errorCode, String errorMsg, int latencyMs) {
-            return new ItemOutcome(false, 0, 0, 0, 0, 0, latencyMs, errorCode, errorMsg);
+            return failed(errorCode, errorMsg, latencyMs, null);
+        }
+
+        /**
+         * 带可重试性表态的失败（D-65）。
+         *
+         * <p>用于"异常在本层已被转成失败结果、但它的可重试性不能丢"的场景——
+         * 目前唯一的使用者是抽点链路：{@code LlmException.misconfigured()}（未配 API Key）
+         * 这类确定性错误不该再退避重试 3 次，白等两个退避周期还多写 2 条
+         * {@code llm_call_log}。</p>
+         *
+         * @param errorCode 错误码
+         * @param errorMsg  面向用户的中文原因
+         * @param latencyMs 耗时（毫秒）
+         * @param retryable 三态表态（{@code null} 表示沿用次数上限）
+         * @return 失败结果
+         */
+        public static ItemOutcome failed(String errorCode, String errorMsg, int latencyMs,
+                                         Boolean retryable) {
+            return new ItemOutcome(false, 0, 0, 0, 0, 0, latencyMs, errorCode, errorMsg, retryable);
         }
     }
 }

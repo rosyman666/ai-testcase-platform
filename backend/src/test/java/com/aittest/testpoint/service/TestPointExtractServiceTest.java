@@ -192,4 +192,40 @@ class TestPointExtractServiceTest {
         // 失败的单元不会去落库
         verify(testPointService, never()).mergeExtraction(anyLong(), any(), any(), any(), any(), any());
     }
+
+    // ------------------------------------------------------------------
+    // D-65：retryable 必须活着离开抽取链路
+    // ------------------------------------------------------------------
+    //
+    // 异常在这里被 {@link #safeExtract} 转成"失败结果"，之后 worker 只看得到
+    // TestPointExtractResult —— 那个类刻意没有 retryable（它是 HTTP 响应体，见 D-28/D-58），
+    // 所以这个信息只能挂在 UnitResult 上。少带一次，worker 就再也拿不回来：
+    // 未配 API Key 的确定性错误仍会被退避重试 3 次。
+
+    @Test
+    @DisplayName("D-65 不可重试的 LlmException：extractUnit 带出 retryable=FALSE")
+    void carriesNonRetryableFlagOutOfExtractUnit() {
+        when(loggingLlmProvider.chat(any(LlmRequest.class)))
+                .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "未配置 API Key", false));
+
+        TestPointExtractService.UnitResult result = service.extractUnit(unit("operation:createUser", 1L));
+
+        assertThat(result.result().success()).isFalse();
+        // 断 Boolean.FALSE 而不是"非 TRUE"：null（未表态）必须仍能通过这一关的否定，
+        // 两者语义不同 —— isFalse() 在 null 上就红，正好把"没赋值"和"赋了 false"分开
+        assertThat(result.retryable()).isFalse();
+    }
+
+    @Test
+    @DisplayName("D-65 可重试的 LlmException：extractUnit 带出 retryable=TRUE，worker 仍按次数上限重试")
+    void carriesRetryableFlagOutOfExtractUnit() {
+        when(loggingLlmProvider.chat(any(LlmRequest.class)))
+                .thenThrow(new LlmException(ErrorCode.E_LLM_UPSTREAM, "上游模型超时", true));
+
+        TestPointExtractService.UnitResult result = service.extractUnit(unit("operation:getUser", 2L));
+
+        assertThat(result.result().success()).isFalse();
+        // 反向断言：不能一律写死 FALSE（那会把真·瞬时故障变成不可重试，失败不再自愈）
+        assertThat(result.retryable()).isTrue();
+    }
 }

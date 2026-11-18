@@ -689,4 +689,53 @@ class GenTaskWorkerTest {
         assertThat(code.getValue()).isEqualTo("E_INTERNAL");
         assertThat(msg.getValue()).isEqualTo("CaseDraft 与 schema 字段漂移");
     }
+
+    // ------------------------------------------------------------------
+    // D-65：retryable 随 ItemOutcome 回来（异常在 handler 内部就被收成失败结果）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("D-65 结果对象里 retryable=FALSE：handler 已收成失败结果也必须短路重试（第 1 次就终态）")
+    void failedOutcomeWithRetryableFalseSkipsRetry() throws Exception {
+        // 抽点链路的形态：LlmException 在 service 层就被转成失败结果，worker 根本 catch 不到，
+        // retryable 只能随 ItemOutcome 回来。FALSE = 确定性错误（未配 API Key 之类），
+        // 重试 3 次只是白等两个退避周期 + 多写 2 条 llm_call_log。
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenReturn(ItemOutcome.failed("E_LLM_UPSTREAM", "未配置 API Key", 0, Boolean.FALSE));
+        when(genTaskItemMapper.countByStatus(TASK_ID)).thenReturn(List.of(row("FAILED", 1)));
+        when(genTaskItemMapper.selectFirstFailedErrorCode(TASK_ID)).thenReturn("E_LLM_UPSTREAM");
+        when(genTaskMapper.markTerminal(eq(TASK_ID), any(String.class), any(String.class),
+                any(String.class), any(LocalDateTime.class))).thenReturn(1);
+
+        worker.run(ITEM_ID);
+
+        verify(genTaskItemMapper, never()).rescheduleForRetry(any(), any(Integer.class),
+                any(), any(), any());
+
+        ArgumentCaptor<Wrapper<GenTaskItem>> wrapper = updateWrapperCaptor();
+        verify(genTaskItemMapper).update(isNull(), wrapper.capture());
+        // attempts=1 而不是 3：3 说明它还是走了两轮退避，短路没生效
+        assertThat(setValues(wrapper.getValue()))
+                .contains("FAILED", 1, "E_LLM_UPSTREAM", "未配置 API Key");
+    }
+
+    @Test
+    @DisplayName("D-65 反向：retryable=null（未表态）时仍按次数上限退避重试，不许当成 FALSE")
+    void failedOutcomeWithoutRetryableStillRetries() throws Exception {
+        // 这条是"把 null 当 false"的防线：14 个既有 ItemOutcome.failed(...) 调用点全都传 null，
+        // 一旦有人把判断写成 !TRUE.equals(retryable)，它们会一次性变成"永不重试"——
+        // 没有任何编译错误，只是失败不再自愈。
+        when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))
+                .thenReturn(ItemOutcome.failed("E_LLM_UPSTREAM", "上游超时", 0));
+
+        worker.run(ITEM_ID);
+
+        ArgumentCaptor<String> code = ArgumentCaptor.forClass(String.class);
+        verify(genTaskItemMapper).rescheduleForRetry(eq(ITEM_ID), eq(1),
+                any(LocalDateTime.class), code.capture(), any(String.class));
+        assertThat(code.getValue()).isEqualTo("E_LLM_UPSTREAM");
+        // 未表态 → 不是终态，不写终态行
+        verify(genTaskItemMapper, never()).update(ArgumentMatchers.<GenTaskItem>isNull(),
+                ArgumentMatchers.<Wrapper<GenTaskItem>>any());
+    }
 }

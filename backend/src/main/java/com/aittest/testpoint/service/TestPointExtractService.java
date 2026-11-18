@@ -170,7 +170,7 @@ public class TestPointExtractService {
      */
     public UnitResult extractUnit(ExtractUnit unit, Long taskId, Long taskItemId) {
         UnitOutcome outcome = safeExtract(unit, taskId, taskItemId);
-        return new UnitResult(outcome.result(), outcome.hashes());
+        return new UnitResult(outcome.result(), outcome.hashes(), outcome.retryable());
     }
 
     /**
@@ -201,9 +201,17 @@ public class TestPointExtractService {
      *
      * @param result     逐单元结果
      * @param keptHashes 本单元产出（含命中已有行）的去重键；失败时是该单元原有点的键（保全用）
+     * @param retryable  本单元失败是否可重试（D-65）：{@code null} = 成功或未表态，
+     *                   {@code FALSE} = 确定性错误（如未配 API Key），{@code TRUE} = 可重试。
+     *                   <p><b>它只在这里和 {@code UnitOutcome} 上存在，<u>不进</u>
+     *                   {@link TestPointExtractResult}</b>：后者是 {@code POST /api/testpoints/extract}
+     *                   的响应体，给它加字段是契约变更，会牵出"后端返回 / 前端类型 / 前端渲染"
+     *                   三处联动（D-28、D-58 同族风险）。可重试性是引擎内部的调度信息，
+     *                   对调用方没有意义。</p>
      * @author 寇豆码
      */
-    public record UnitResult(TestPointExtractResult result, Set<String> keptHashes) {
+    public record UnitResult(TestPointExtractResult result, Set<String> keptHashes,
+                             Boolean retryable) {
     }
 
     /**
@@ -282,9 +290,13 @@ public class TestPointExtractService {
         } catch (LlmException ex) {
             log.warn("[TESTPOINT] 单元抽取失败，保留该单元原有测试点 sourceRef={} 错误码={} 原因={}",
                     unit.sourceRef(), ex.getErrorCode(), ex.getMessage());
+            // D-65：异常的 retryable 必须随结果一起带出去。异常在这里被转成"失败结果"，
+            // 之后就再没有人能知道它是确定性错误（未配 API Key）还是瞬时故障（上游 5xx），
+            // 结果是不该重试的也被退避重试 3 次。
             return new UnitOutcome(
                     TestPointExtractResult.failed(unit.sourceRef(), userFacingMessage(ex)),
-                    testPointService.keptHashesOfUnit(unit.docId(), unit.operationId(), unit.sectionId()));
+                    testPointService.keptHashesOfUnit(unit.docId(), unit.operationId(), unit.sectionId()),
+                    ex.isRetryable());
         }
     }
 
@@ -354,17 +366,21 @@ public class TestPointExtractService {
 
         TestPointExtractResult result = new TestPointExtractResult(unit.sourceRef(), true,
                 drafts.size(), merged.inserted(), parsed.repaired(), parsed.truncated(), null);
-        return new UnitOutcome(result, merged.keptHashes());
+        // 成功路径不对可重试性表态（null）：这一路根本没有失败可谈
+        return new UnitOutcome(result, merged.keptHashes(), null);
     }
 
     /**
-     * 一个单元的抽取产出：结果（进报告）+ 去重键（供文档级取代判定汇总）。
+     * 一个单元的抽取产出：结果（进报告）+ 去重键（供文档级取代判定汇总）+ 可重试性。
      *
-     * @param result 逐单元结果
-     * @param hashes 本单元产出（含命中已有行）的去重键
+     * @param result    逐单元结果
+     * @param hashes    本单元产出（含命中已有行）的去重键
+     * @param retryable 失败是否可重试（D-65）：{@code null} = 成功/未表态，否则取
+     *                  {@code LlmException.isRetryable()} 的原值
      * @author 寇豆码
      */
-    private record UnitOutcome(TestPointExtractResult result, Set<String> hashes) {
+    private record UnitOutcome(TestPointExtractResult result, Set<String> hashes,
+                               Boolean retryable) {
     }
 
     /**

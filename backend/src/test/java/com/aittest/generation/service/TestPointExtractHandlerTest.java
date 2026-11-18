@@ -160,7 +160,7 @@ class TestPointExtractHandlerTest {
         GenTaskItem item = newItem(7201L, "RUNNING", REF_OK, null);
         Set<String> hashes = new LinkedHashSet<>(List.of("h1", "h2", "h3"));
         when(extractService.extractUnit(eq(unit(REF_OK)), eq(TASK_ID), eq(7201L)))
-                .thenReturn(new UnitResult(okResult(2), hashes));
+                .thenReturn(new UnitResult(okResult(2), hashes, null));
 
         ItemOutcome outcome = handler.execute(newTask(), item);
 
@@ -178,16 +178,37 @@ class TestPointExtractHandlerTest {
         GenTaskItem item = newItem(7202L, "RUNNING", REF_OK, null);
         TestPointExtractResult failed = TestPointExtractResult.failed(REF_OK, "模型超时");
         when(extractService.extractUnit(eq(unit(REF_OK)), eq(TASK_ID), eq(7202L)))
-                .thenReturn(new UnitResult(failed, new LinkedHashSet<>(List.of("old-point"))));
+                .thenReturn(new UnitResult(failed, new LinkedHashSet<>(List.of("old-point")), null));
 
         ItemOutcome outcome = handler.execute(newTask(), item);
 
         assertThat(outcome.success()).isFalse();
         assertThat(outcome.errorCode()).isEqualTo("E_LLM_UPSTREAM");
         assertThat(outcome.errorMsg()).isEqualTo("模型超时");
+        // UnitResult.retryable = null（没表态）→ 结果上也必须是 null，
+        // 不能悄悄变成 Boolean.FALSE（那等于把既有失败路径全改成永不重试）
+        assertThat(outcome.retryable()).isNull();
         ArgumentCaptor<Wrapper<GenTaskItem>> wrapper = updateWrapperCaptor();
         verify(genTaskItemMapper).update(isNull(), wrapper.capture());
         assertThat(setValues(wrapper.getValue())).contains("old-point");
+    }
+
+    @Test
+    @DisplayName("D-65 透传：失败单元的 retryable 原样随 ItemOutcome 回来（FALSE 才能让 worker 短路重试）")
+    void executePropagatesRetryableFromUnitResult() {
+        wirePlan(REF_OK);
+        GenTaskItem item = newItem(7203L, "RUNNING", REF_OK, null);
+        TestPointExtractResult failed = TestPointExtractResult.failed(REF_OK, "未配置 API Key");
+        when(extractService.extractUnit(eq(unit(REF_OK)), eq(TASK_ID), eq(7203L)))
+                .thenReturn(new UnitResult(failed, new LinkedHashSet<>(), Boolean.FALSE));
+
+        ItemOutcome outcome = handler.execute(newTask(), item);
+
+        assertThat(outcome.success()).isFalse();
+        assertThat(outcome.errorCode()).isEqualTo("E_LLM_UPSTREAM");
+        // 关键断言：既不是 null（未表态、会重试 3 次）也不是 TRUE。
+        // 只有 FALSE 能让 GenTaskWorker 跳过退避重试——这正是 D-65 要救的那条链路。
+        assertThat(outcome.retryable()).isEqualTo(Boolean.FALSE);
     }
 
     @Test
@@ -196,7 +217,7 @@ class TestPointExtractHandlerTest {
         wirePlan(REF_OK);
         GenTaskItem item = newItem(7210L, "RUNNING", REF_OK, null);
         when(extractService.extractUnit(eq(unit(REF_OK)), eq(TASK_ID), eq(7210L)))
-                .thenReturn(new UnitResult(okResult(1), new LinkedHashSet<>()));
+                .thenReturn(new UnitResult(okResult(1), new LinkedHashSet<>(), null));
 
         ItemOutcome outcome = handler.execute(newTask(), item);
 
@@ -213,7 +234,7 @@ class TestPointExtractHandlerTest {
         GenTaskItem item = newItem(7211L, "RUNNING", REF_OK, null);
         item.setAttempts(2);
         when(extractService.extractUnit(eq(unit(REF_OK)), eq(TASK_ID), eq(7211L)))
-                .thenReturn(new UnitResult(okResult(1), new LinkedHashSet<>()));
+                .thenReturn(new UnitResult(okResult(1), new LinkedHashSet<>(), null));
 
         ItemOutcome outcome = handler.execute(newTask(), item);
 

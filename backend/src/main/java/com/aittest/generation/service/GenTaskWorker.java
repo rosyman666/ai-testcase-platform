@@ -168,6 +168,14 @@ public class GenTaskWorker {
             outcome = ItemOutcome.failed("E_INTERNAL", ex.getMessage(), latency);
         }
 
+        // D-65：handler 自己把失败收成 ItemOutcome 时，retryable 只能随结果对象回来
+        // （抽取链路在 service 层就把 LlmException 转成了失败结果）。null = 没表态，沿用次数上限。
+        // 只有明确的 FALSE 才短路：写成 !TRUE.equals(...) 会把"没表态"当成"不可重试"，
+        // 让所有既有失败路径一次性变成永不重试。
+        if (Boolean.FALSE.equals(outcome.retryable())) {
+            permanentFailure = true;
+        }
+
         if (outcome.success()) {
             return completeItem(task, item, outcome);
         }

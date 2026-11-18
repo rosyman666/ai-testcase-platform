@@ -110,9 +110,13 @@ public class TestPointExtractHandler implements TaskItemHandler {
 
         TestPointExtractResult r = result.result();
         if (!r.success()) {
+            // D-65：retryable 取自 UnitResult（不是 TestPointExtractResult——那里刻意没有这个字段，
+            // 它是 HTTP 响应体，加字段等于契约变更）。错误码仍固定 E_LLM_UPSTREAM：
+            // 把 schema/parse 的真实码透传是另一条独立的债（会牵动 t06/t07 黑盒断言），本批不碰。
             return ItemOutcome.failed("E_LLM_UPSTREAM",
                     r.error() == null ? "抽取失败" : r.error(),
-                    0);
+                    0,
+                    result.retryable());
         }
         return ItemOutcome.ok(r.insertedCount(), 0, 0, 0, 0);
     }

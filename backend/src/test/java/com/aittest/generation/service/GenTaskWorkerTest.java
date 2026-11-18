@@ -722,7 +722,7 @@ class GenTaskWorkerTest {
     @Test
     @DisplayName("D-65 反向：retryable=null（未表态）时仍按次数上限退避重试，不许当成 FALSE")
     void failedOutcomeWithoutRetryableStillRetries() throws Exception {
-        // 这条是"把 null 当 false"的防线：14 个既有 ItemOutcome.failed(...) 调用点全都传 null，
+        // 这条是"把 null 当 false"的防线：13 个既有 ItemOutcome.failed(...) 调用点（基线 `grep` 命中 14 行，其中 1 行是定义）全都传 null，
         // 一旦有人把判断写成 !TRUE.equals(retryable)，它们会一次性变成"永不重试"——
         // 没有任何编译错误，只是失败不再自愈。
         when(handler.execute(any(GenTask.class), any(GenTaskItem.class)))

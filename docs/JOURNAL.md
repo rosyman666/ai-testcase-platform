@@ -849,7 +849,7 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 ### 做了什么
 
-1. `TaskItemHandler.ItemOutcome` 末尾加**三态** `Boolean retryable`（`null` = 未表态 / `FALSE` = 确定性错误 / `TRUE` = 明确可重试）；`ok`/`degraded` 传 `null`，三参 `failed(...)` **委托**新四参版本传 `null`，14 个既有调用点语义零变化。
+1. `TaskItemHandler.ItemOutcome` 末尾加**三态** `Boolean retryable`（`null` = 未表态 / `FALSE` = 确定性错误 / `TRUE` = 明确可重试）；`ok`/`degraded` 传 `null`，三参 `failed(...)` **委托**新四参版本传 `null`，13 个既有调用点语义零变化。
 2. `TestPointExtractService`：`UnitOutcome` 与 `UnitResult` 各加该字段；`safeExtract` 的 catch 传 `ex.isRetryable()`、成功分支传 `null`；`extractUnit` 把 `outcome.retryable()` 转发出去。
 3. `TestPointExtractHandler` 失败分支透传 `result.retryable()`；**错误码仍固定 `E_LLM_UPSTREAM`**。
 4. `GenTaskWorker` 在两个 catch 之后、`if (outcome.success())` 之前加 `if (Boolean.FALSE.equals(outcome.retryable())) → permanentFailure = true`；`D-45` 那行 `!ex.isRetryable()` 一字未动。
@@ -859,16 +859,16 @@ data:{"code":40101,"message":"缺少 token，无法订阅任务进度","data":nu
 
 | 决策 | 依据 | 放弃的方案 |
 |---|---|---|
-| `retryable` 用 `Boolean` 而非 `boolean` | `ItemOutcome.failed(...)` 有 14 个既有调用点；基本类型会把它们一次性默认成 `false`，等于把所有失败改成"永不重试"，**且没有编译错误** | 基本类型 + 逐个调用点显式传 `true`：漏一个就是一条静默的行为变更，评审看不出来 |
+| `retryable` 用 `Boolean` 而非 `boolean` | `ItemOutcome.failed(...)` 有 13 个既有调用点；基本类型会把它们一次性默认成 `false`，等于把所有失败改成"永不重试"，**且没有编译错误** | 基本类型 + 逐个调用点显式传 `true`：漏一个就是一条静默的行为变更，评审看不出来 |
 | 字段挂在 `UnitResult`，**不进** `TestPointExtractResult` | 后者是 `POST /api/testpoints/extract` 的响应体，加字段是契约变更，要同时改前端类型与渲染（D-28 / D-58 同族） | 塞进响应 DTO：省一层转发，但把内部调度信息变成对外契约 |
 | worker 侧另起一个 `if`，不与 D-45 的 `catch` 合并 | D-45 的 `permanentFailure = !ex.isRetryable()` 被 `nonRetryableLlmFailureGoesPermanentImmediately` 锁住；合并会让两条链路的判别力互相掩护 | 合并成一条：改动小，但 M2 变异时两条用例会一起红，分不清是哪条链路坏了 |
 | 错误码不动 | 抽点链路把 schema/parse 的真实码压成 `E_LLM_UPSTREAM` 是**另一条独立的债**，透传会牵动 `t06`/`t07` 黑盒断言 | 顺手一起改：改动面从"加一个字段"扩到"改黑盒契约"，本轮没法收敛 |
 
 ### 踩坑记录
 
-- **"三态"不是洁癖，是唯一能同时表达"不知道"和"不要重试"的类型**：`null` / `FALSE` / `TRUE` 缺一个，14 个既有失败点就会被卷入改造。最初我写方案时只写了"加一个可空字段"，是核 `ItemOutcome.failed(...)` 的调用点数量（14 处）之后才确认基本类型不可用——**先在代码里数一遍调用点，再决定类型**。
+- **"三态"不是洁癖，是唯一能同时表达"不知道"和"不要重试"的类型**：`null` / `FALSE` / `TRUE` 缺一个，13 个既有失败点就会被卷入改造。最初我写方案时只写了"加一个可空字段"，是核 `ItemOutcome.failed(...)` 的调用点数量（14 处）之后才确认基本类型不可用——**先在代码里数一遍调用点，再决定类型**。
 - **一条防线本身也要被测**：`assertThat(retryable).isFalse()` 能不能区分 `null` 与 `FALSE`，取决于 AssertJ 的行为。用项目实际依赖的版本（3.25.3）实测：`isFalse()` 对 `Boolean null` 抛 `AssertionError: Expecting actual not to be null`，所以"`null` 仍然重试"这条反向用例不是假绿。**这个问题问了两轮才有人去实测**，此前一直是口头结论。
-- **M2 变异红 5 例，看起来像"测试太脆"，实际是风险的可视化**：把 `Boolean.FALSE.equals(...)` 改成 `!Boolean.TRUE.equals(...)` 后，除了目标用例，4 个**既有**重试用例一起红——它们正是"14 个调用点被默认成永不重试"之后会坏掉的那批。**红得多不等于判别力差，要看红的是不是同一类**。
+- **M2 变异红 5 例，看起来像"测试太脆"，实际是风险的可视化**：把 `Boolean.FALSE.equals(...)` 改成 `!Boolean.TRUE.equals(...)` 后，除了目标用例，4 个**既有**重试用例一起红——它们正是"13 个调用点被默认成永不重试"之后会坏掉的那批。**红得多不等于判别力差，要看红的是不是同一类**。
 - **验证不能只等一个来源**：复验方中途被打断、没有回报，我没有继续等，而是自己跑全量（346/0/0/7，从 38 个 surefire 报告汇总，不取管道退出码）并另设两个**与实现方不同**的变异（转发丢字段 / catch 写死 `TRUE`）。上一批已经吃过"采信单方结论"的亏。
 
 ### 验收事实（2026-11-18）
